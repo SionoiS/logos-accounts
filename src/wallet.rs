@@ -148,6 +148,23 @@ where
         Ok(guard.get(key).cloned())
     }
 
+    /// Drop a cached public key (e.g. before rotation so the next `get_key` re-exports).
+    pub fn clear_cached_public_key(&self, key: &Key) -> Result<(), E> {
+        {
+            let mut cache = self.pub_cache.lock().map_err(lock_err).map_err(E::from)?;
+            cache.remove(key);
+        }
+        let mut fps = self.fingerprints.lock().map_err(lock_err).map_err(E::from)?;
+        fps.remove(key);
+        Ok(())
+    }
+
+    /// Replace the BIP32 mapping for `key` and clear any cached Multikey.
+    pub fn rebind_path(&self, key: Key, derivation: &str) -> Result<(), E> {
+        self.clear_cached_public_key(&key)?;
+        self.register_path(key, derivation)
+    }
+
     /// Software Multikey verifier helper bound to the same error type.
     pub fn verifier(&self) -> MultikeyVerifier<E>
     where

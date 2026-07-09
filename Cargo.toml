@@ -22,11 +22,13 @@ logos-rust-sdk = { git = "https://github.com/logos-co/logos-rust-sdk", branch = 
 
 # BetterSign trait surface + multibase types (same git workspace as `bs`)
 bs-traits = { git = "https://github.com/cryptidtech/bs", branch = "main" }
+bs-wallets = { git = "https://github.com/cryptidtech/bs", branch = "main", features = ["sync"] }
 multikey = { git = "https://github.com/cryptidtech/bs", branch = "main" }
 multisig = { git = "https://github.com/cryptidtech/bs", branch = "main" }
 multicodec = { git = "https://github.com/cryptidtech/bs", branch = "main" }
 multicid = { git = "https://github.com/cryptidtech/bs", branch = "main" }
 multihash = { git = "https://github.com/cryptidtech/bs", branch = "main" }
+multibase = { git = "https://github.com/cryptidtech/bs", branch = "main" }
 provenance-log = { git = "https://github.com/cryptidtech/bs", branch = "main" }
 
 # Keycard transport bounds
@@ -46,6 +48,8 @@ tokio = { version = "1", features = ["sync", "rt", "macros"] }
 thiserror = "2"
 tracing = "0.1"
 futures = "0.3"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
 
 # Pin blake3: 1.8+ requires digest 0.11, but multihash (bs) still needs digest 0.10 + traits-preview
 blake3 = { version = "=1.5.5", features = ["traits-preview", "zeroize"] }

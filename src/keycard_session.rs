@@ -107,6 +107,18 @@ where
     ) -> Result<alloy_primitives::Signature, Error> {
         block_on_card(self.card.as_ref(), |card| Ok(card.sign(prehash, path, false)?))
     }
+
+    /// Query application status (PIN retries, key initialized, …).
+    pub async fn get_status(&self) -> Result<nexum_keycard::ApplicationStatus, Error> {
+        let mut card = self.card.lock().await;
+        Ok(card.get_status()?)
+    }
+
+    /// Re-select the Keycard applet and return application info (key UID, version, …).
+    pub async fn application_info(&self) -> Result<nexum_keycard::ApplicationInfo, Error> {
+        let mut card = self.card.lock().await;
+        Ok(card.select_keycard()?)
+    }
 }
 
 /// Run work against a tokio mutex without requiring a running async runtime

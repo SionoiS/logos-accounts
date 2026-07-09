@@ -81,6 +81,26 @@ pub enum Error {
     /// Generic message
     #[error("{0}")]
     Message(String),
+
+    /// Wallet / card session not connected
+    #[error("not connected: call connect (or attach_wallet) first")]
+    NotConnected,
+
+    /// No account loaded or created
+    #[error("no account loaded: call create_account or load_account first")]
+    NoAccount,
+
+    /// Encoding / decoding failure (multibase, JSON, …)
+    #[error("encoding error: {0}")]
+    Encoding(String),
+
+    /// Invalid account operation / policy
+    #[error("invalid operation: {0}")]
+    InvalidOp(String),
+
+    /// bs-wallets error (software wallet path / tests)
+    #[error(transparent)]
+    Wallets(#[from] bs_wallets::Error),
 }
 
 impl From<nexum_keycard::Error> for Error {
