@@ -8,11 +8,13 @@ This repository will implement provenance-based identity (VLADs + provenance log
 
 | Phase | Description | Status |
 |-------|-------------|--------|
-| **1** | BetterSign Keycard integration (wallet traits) | Planned — **active focus** |
-| **2** | Domain API | **WIP** (not started) |
+| **1** | BetterSign Keycard integration (wallet traits) | **Done** (unit-tested; hardware tests optional/`#[ignore]`) |
+| **2** | Domain API | **Done** (`AccountsApi`; software integration tests) |
 | **3** | Logos module exposure | **WIP** (not started) |
 
-The crate is currently a dependency-wired stub (`staticlib` + git deps only). Implementation starts with Phase 1.
+Phase 1 provides `KeycardWallet` implementing BetterSign async (and sync) `KeyManager` + `MultiSigner` with hybrid software-ephemeral / Keycard-long-lived crypto.
+
+Phase 2 provides `AccountsApi` — an IPC-friendly service (multibase strings / JSON ops) over the wallet for create/load/update/verify/export, ready for LIDL in Phase 3.
 
 ## Dependencies
 
@@ -178,9 +180,9 @@ Beyond existing git deps:
 
 ---
 
-## Phase 2 — Domain API (**WIP**)
+## Phase 2 — Domain API
 
-> **Status: WIP.** Design draft only; implement after Phase 1 wallet traits are solid.
+> **Status: Done.** See `src/api.rs`, `src/config.rs`, `src/encoding.rs`.
 
 **Goal:** A small, IPC-friendly service API that other code (and later LIDL) calls, without exposing trait generics across the module boundary.
 
