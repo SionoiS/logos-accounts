@@ -1,9 +1,12 @@
 [package]
-name = "logos-accounts"
+name = "logos_accounts"
 version = "1.0.0"
 edition = "2024"
 description = "BetterSign accounts backed by Keycard hardware, exposed as a Logos module"
 license = "MIT OR Apache-2.0"
+
+# Standalone crate — keep cargo from adopting a parent workspace.
+[workspace]
 
 [lib]
 # staticlib for Logos packaging; rlib so unit tests and dependents can link
@@ -18,6 +21,7 @@ pcsc = ["dep:nexum-apdu-transport-pcsc"]
 # Core integration targets
 nexum-keycard = { git = "https://github.com/nxm-rs/keycard", branch = "main" }
 bs = { git = "https://github.com/cryptidtech/bs", branch = "main" }
+# Builder may pin logos-rust-sdk; keep git dep for local cargo test of the lib alone.
 logos-rust-sdk = { git = "https://github.com/logos-co/logos-rust-sdk", branch = "master" }
 
 # BetterSign trait surface + multibase types (same git workspace as `bs`)
@@ -44,7 +48,7 @@ alloy-primitives = { version = "1", default-features = false, features = ["k256"
 bytes = "1"
 
 # Async + utility
-tokio = { version = "1", features = ["sync", "rt", "macros"] }
+tokio = { version = "1", features = ["sync", "rt", "rt-multi-thread", "macros"] }
 thiserror = "2"
 tracing = "0.1"
 futures = "0.3"

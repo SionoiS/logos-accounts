@@ -225,11 +225,11 @@ where
         let multisig = alloy_signature_to_multisig(&sig).map_err(E::from)?;
 
         // Optional self-check when we already have the public key cached
-        if let Some(pk) = self.get_cached(key_path)?
-            && let Err(e) = pk.verify_view()?.verify(&multisig, Some(data))
-        {
-            tracing::warn!(%key_path, error = %e, "card signature failed local Multikey verify");
-            return Err(E::from(Error::from(e)));
+        if let Some(pk) = self.get_cached(key_path)? {
+            if let Err(e) = pk.verify_view()?.verify(&multisig, Some(data)) {
+                tracing::warn!(%key_path, error = %e, "card signature failed local Multikey verify");
+                return Err(E::from(Error::from(e)));
+            }
         }
 
         Ok(multisig)
@@ -245,11 +245,11 @@ where
             .map_err(E::from)?;
         let multisig = alloy_signature_to_multisig(&sig).map_err(E::from)?;
 
-        if let Some(pk) = self.get_cached(key_path)?
-            && let Err(e) = pk.verify_view()?.verify(&multisig, Some(data))
-        {
-            tracing::warn!(%key_path, error = %e, "card signature failed local Multikey verify");
-            return Err(E::from(Error::from(e)));
+        if let Some(pk) = self.get_cached(key_path)? {
+            if let Err(e) = pk.verify_view()?.verify(&multisig, Some(data)) {
+                tracing::warn!(%key_path, error = %e, "card signature failed local Multikey verify");
+                return Err(E::from(Error::from(e)));
+            }
         }
 
         Ok(multisig)

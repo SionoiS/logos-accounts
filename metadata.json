@@ -1,0 +1,28 @@
+{
+  "name": "logos_accounts_module",
+  "version": "1.0.0",
+  "description": "BetterSign accounts backed by Keycard hardware",
+  "author": "Logos Accounts",
+  "type": "core",
+  "interface": "cdylib",
+  "category": "identity",
+  "main": "logos_accounts_module_plugin",
+  "dependencies": [],
+  "include": [],
+  "capabilities": [],
+  "codegen": {
+    "lidl": "rust-lib/logos_accounts_module.lidl",
+    "rust": { "crate": "rust-lib", "staticlib": "logos_accounts" }
+  },
+  "nix": {
+    "external_libraries": [],
+    "packages": {
+      "build": [],
+      "runtime": []
+    },
+    "cmake": {
+      "find_packages": [],
+      "extra_include_dirs": []
+    }
+  }
+}

@@ -10,11 +10,13 @@ This repository will implement provenance-based identity (VLADs + provenance log
 |-------|-------------|--------|
 | **1** | BetterSign Keycard integration (wallet traits) | **Done** (unit-tested; hardware tests optional/`#[ignore]`) |
 | **2** | Domain API | **Done** (`AccountsApi`; software integration tests) |
-| **3** | Logos module exposure | **WIP** (not started) |
+| **3** | Logos module exposure | **Done** (LIDL + packaging; `cargo test` in `rust-lib/`) |
 
 Phase 1 provides `KeycardWallet` implementing BetterSign async (and sync) `KeyManager` + `MultiSigner` with hybrid software-ephemeral / Keycard-long-lived crypto.
 
-Phase 2 provides `AccountsApi` — an IPC-friendly service (multibase strings / JSON ops) over the wallet for create/load/update/verify/export, ready for LIDL in Phase 3.
+Phase 2 provides `AccountsApi` — an IPC-friendly service (multibase strings / JSON ops) over the wallet for create/load/update/verify/export.
+
+Phase 3 packages the library as a Logos module (`metadata.json`, `CMakeLists.txt`, `flake.nix`, `rust-lib/logos_accounts_module.lidl`) with `AccountsModuleImpl` implementing the generated provider trait.
 
 ## Dependencies
 
@@ -230,15 +232,13 @@ Mirror `bs` tests but with **secp256k1**:
 
 ---
 
-## Phase 3 — Logos module exposure (**WIP**)
+## Phase 3 — Logos module exposure
 
-> **Status: WIP.** Design draft only; implement after Phase 2 API is usable.
+> **Status: Done.** Layout matches `logos-rust-sdk` `rust-calc`; local tests: `cd rust-lib && cargo test`.
 
 **Goal:** Wrap the API as a loadable Logos plugin so peer modules get a **typed client** from LIDL.
 
 ### 3.1 Repo reshape (Logos builder path)
-
-Follow `logos-rust-sdk` doctest `rust-calc` layout:
 
 ```
 logos-accounts/
@@ -246,15 +246,16 @@ logos-accounts/
   CMakeLists.txt
   flake.nix
   rust-lib/
-    Cargo.toml              # name = logos_accounts, crate-type = ["staticlib"]
+    Cargo.toml              # name = logos_accounts, crate-type = ["rlib","staticlib"]
     logos_accounts_module.lidl
+    generated/provider_gen.rs   # checked-in scaffold (builder may overwrite)
     src/
-      lib.rs                # include generated scaffold; impl trait; logos_module_install
+      lib.rs                # include scaffold; logos_module_install
+      module.rs             # AccountsModuleImpl → SoftwareAccountsApi
       … (Phase 1–2 modules)
-    generated/              # provider_gen.rs produced by builder (or gitignored)
 ```
 
-Root package today becomes `rust-lib/`. Builder supplies/pins `logos-rust-sdk` in production builds; keep an explicit git dep for local `cargo test` of the lib alone.
+Builder supplies/pins `logos-rust-sdk` in production builds; `rust-lib` keeps an explicit git dep for local `cargo test`.
 
 ### 3.2 LIDL contract (public surface)
 
@@ -325,8 +326,8 @@ modules().logos_accounts_module.create_account()...
 
 ### 3.6 Phase 3 verification
 
-- `cargo test` in `rust-lib` (unit + API)
-- Builder / `nix build` of the module package when toolchain available
+- `cd rust-lib && cargo test` — **22 tests pass** (wallet + API + module LIDL mapping)
+- Builder / `nix build` of the module package when `logos-module-builder` toolchain is available
 - Optional caller module exercising `create_account` / `verify_plog` through logoscore
 
 ---
@@ -335,12 +336,12 @@ modules().logos_accounts_module.create_account()...
 
 | Path | Action |
 |------|--------|
-| `Cargo.toml` / later `rust-lib/Cargo.toml` | Expand deps; features `pcsc`, `sync` |
-| `src/wallet.rs` (etc.) | Keycard trait implementations |
-| `src/api.rs` | Domain API (**Phase 2 WIP**) |
-| `rust-lib/logos_accounts_module.lidl` | Public Logos contract (**Phase 3 WIP**) |
-| `rust-lib/src/lib.rs` | Module trait impl + install hook (**Phase 3 WIP**) |
-| `metadata.json`, `CMakeLists.txt`, `flake.nix` | Logos packaging (**Phase 3 WIP**) |
+| `rust-lib/Cargo.toml` | Lib deps; features `pcsc` |
+| `rust-lib/src/wallet.rs` (etc.) | Keycard trait implementations |
+| `rust-lib/src/api.rs` | Domain API |
+| `rust-lib/logos_accounts_module.lidl` | Public Logos contract |
+| `rust-lib/src/module.rs` + `lib.rs` | Module trait impl + install hook |
+| `metadata.json`, `CMakeLists.txt`, `flake.nix` | Logos packaging |
 
 ## Existing code to reuse
 

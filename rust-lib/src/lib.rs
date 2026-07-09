@@ -3,23 +3,34 @@
 //! # Phase 1 — wallet traits
 //!
 //! [`KeycardWallet`] satisfies BetterSign's opinionated
-//! [`bs::config::asynchronous::KeyManager`] and [`bs::config::asynchronous::MultiSigner`]
-//! (and the sync pair) without forking `bs`.
-//!
-//! ## Hybrid crypto
-//!
-//! - **Ephemeral keys** (VLAD, first-entry): generated in software, signed once, dropped.
-//! - **Long-lived `/pubkey`**: exported/signed on Keycard at a registered BIP32 path.
-//!
-//! Only **secp256k1** is supported (Keycard hardware constraint). Signing prehashes with
-//! SHA-256 before calling card `sign`, matching Multikey Es256K verification.
+//! [`bs::config::asynchronous::KeyManager`] and [`bs::config::asynchronous::MultiSigner`].
 //!
 //! # Phase 2 — domain API
 //!
-//! [`AccountsApi`] is an IPC-friendly service (multibase strings / JSON ops) that owns a
-//! wallet and optional [`bs::BetterSign`] account — the surface Phase 3 LIDL will map.
+//! [`AccountsApi`] is an IPC-friendly service (multibase strings / JSON ops).
+//!
+//! # Phase 3 — Logos module
+//!
+//! This crate is the `rust-lib` half of a Logos module package. The builder
+//! (or checked-in scaffold) generates `generated/provider_gen.rs` from
+//! `logos_accounts_module.lidl`. [`module::AccountsModuleImpl`] implements the
+//! generated trait and is installed via [`logos_module_install`].
 
 #![deny(missing_docs)]
+
+/// Builder / lidl-gen scaffold: C ABI, `LogosAccountsModule` trait, event emitters.
+#[allow(missing_docs)]
+mod provider_scaffold {
+    include!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/generated/provider_gen.rs"
+    ));
+}
+
+pub use provider_scaffold::{
+    context, emit_account_created, emit_account_updated, emit_card_error, install,
+    LogosAccountsModule, RustModuleContext,
+};
 
 mod api;
 mod config;
@@ -27,6 +38,7 @@ mod convert;
 mod encoding;
 mod error;
 mod keycard_session;
+mod module;
 mod path_map;
 mod verifier;
 mod wallet;
@@ -50,6 +62,7 @@ pub use encoding::{
 };
 pub use error::Error;
 pub use keycard_session::{KeycardSession, SharedKeycard};
+pub use module::AccountsModuleImpl;
 pub use path_map::{parse_derivation_path, PathMap, DEFAULT_PUBKEY_PATH};
 pub use verifier::{verify_multikey, MultikeyVerifier};
 pub use wallet::{
@@ -59,3 +72,9 @@ pub use wallet::{
 
 /// Crate result alias.
 pub type Result<T> = std::result::Result<T, Error>;
+
+/// Logos host install hook — registers [`AccountsModuleImpl`].
+#[unsafe(no_mangle)]
+pub extern "Rust" fn logos_module_install() {
+    install::<AccountsModuleImpl>();
+}
