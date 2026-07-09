@@ -64,10 +64,8 @@ pub trait LogosAccountsModule: Send + 'static {
     /// One-time setup after host stamps module context.
     fn on_context_ready(&mut self, _ctx: &RustModuleContext) {}
 
-    fn connect(&mut self, pin: String, pairing_key_hex: String, pairing_index: i64) -> String;
-    fn card_status(&mut self) -> String;
-    fn create_account(&mut self) -> String;
-    fn load_account(&mut self, plog_b64: String) -> String;
+    fn create_account(&mut self, storage_json: String) -> String;
+    fn load_account(&mut self, plog_b64: String, storage_json: String) -> String;
     fn update_account(&mut self, ops_json: String) -> String;
     fn export_plog(&mut self) -> String;
     fn get_vlad(&mut self) -> String;
@@ -122,42 +120,30 @@ pub fn install<T: LogosAccountsModule + Default>() {
         }
         let imp: &mut T = guard.as_mut().unwrap().downcast_mut::<T>()?;
         match method {
-            "connect" => {
-                if args.len() < 3 {
+            "create_account" => {
+                if args.is_empty() {
                     return None;
                 }
-                let result = imp.connect(
+                let result = imp.create_account(
+                    args.get(0)
+                        .unwrap_or(&serde_json::Value::Null)
+                        .as_str()
+                        .unwrap_or_default()
+                        .to_string(),
+                );
+                Some(serde_json::Value::from(result))
+            }
+            "load_account" => {
+                if args.len() < 2 {
+                    return None;
+                }
+                let result = imp.load_account(
                     args.get(0)
                         .unwrap_or(&serde_json::Value::Null)
                         .as_str()
                         .unwrap_or_default()
                         .to_string(),
                     args.get(1)
-                        .unwrap_or(&serde_json::Value::Null)
-                        .as_str()
-                        .unwrap_or_default()
-                        .to_string(),
-                    args.get(2)
-                        .unwrap_or(&serde_json::Value::Null)
-                        .as_i64()
-                        .unwrap_or_default(),
-                );
-                Some(serde_json::Value::from(result))
-            }
-            "card_status" => {
-                let result = imp.card_status();
-                Some(serde_json::Value::from(result))
-            }
-            "create_account" => {
-                let result = imp.create_account();
-                Some(serde_json::Value::from(result))
-            }
-            "load_account" => {
-                if args.len() < 1 {
-                    return None;
-                }
-                let result = imp.load_account(
-                    args.get(0)
                         .unwrap_or(&serde_json::Value::Null)
                         .as_str()
                         .unwrap_or_default()
@@ -284,10 +270,8 @@ pub extern "C" fn logos_module_dispatch(
 pub extern "C" fn logos_module_get_methods() -> *mut c_char {
     to_c_string(
         r#"[
-{"isInvokable":true,"name":"connect","parameters":[{"name":"pin","type":"QString"},{"name":"pairing_key_hex","type":"QString"},{"name":"pairing_index","type":"int"}],"returnType":"QString","signature":"connect(QString,QString,int)"},
-{"isInvokable":true,"name":"card_status","returnType":"QString","signature":"card_status()"},
-{"isInvokable":true,"name":"create_account","returnType":"QString","signature":"create_account()"},
-{"isInvokable":true,"name":"load_account","parameters":[{"name":"plog_b64","type":"QString"}],"returnType":"QString","signature":"load_account(QString)"},
+{"isInvokable":true,"name":"create_account","parameters":[{"name":"storage_json","type":"QString"}],"returnType":"QString","signature":"create_account(QString)"},
+{"isInvokable":true,"name":"load_account","parameters":[{"name":"plog_b64","type":"QString"},{"name":"storage_json","type":"QString"}],"returnType":"QString","signature":"load_account(QString,QString)"},
 {"isInvokable":true,"name":"update_account","parameters":[{"name":"ops_json","type":"QString"}],"returnType":"QString","signature":"update_account(QString)"},
 {"isInvokable":true,"name":"export_plog","returnType":"QString","signature":"export_plog()"},
 {"isInvokable":true,"name":"get_vlad","returnType":"QString","signature":"get_vlad()"},

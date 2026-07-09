@@ -2,7 +2,7 @@
 name = "logos_accounts"
 version = "1.0.0"
 edition = "2024"
-description = "BetterSign accounts backed by Keycard hardware, exposed as a Logos module"
+description = "BetterSign accounts with pluggable key storage (local or Keycard), exposed as a Logos module"
 license = "MIT OR Apache-2.0"
 
 # Standalone crate — keep cargo from adopting a parent workspace.

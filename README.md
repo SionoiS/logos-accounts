@@ -1,22 +1,17 @@
 # logos-accounts
 
-BetterSign accounts backed by **Keycard** hardware, exposed as a **Logos module**.
+BetterSign accounts with **pluggable key storage** (local software wallet or **Keycard** hardware), exposed as a **Logos module**.
 
-This repository will implement provenance-based identity (VLADs + provenance logs / p-logs) using the [BetterSign](https://github.com/cryptidtech/bs) (`bs`) stack, with cryptographic signing performed on a [Keycard](https://github.com/nxm-rs/keycard) via `nexum-keycard`, and the surface area published to other Logos modules through [logos-rust-sdk](https://github.com/logos-co/logos-rust-sdk).
+This repository implements provenance-based identity (VLADs + provenance logs / p-logs) using the [BetterSign](https://github.com/cryptidtech/bs) (`bs`) stack. Long-lived signing can run in process (for tests and CI) or on a [Keycard](https://github.com/nxm-rs/keycard) via `nexum-keycard`. Peer modules use the surface published through [logos-rust-sdk](https://github.com/logos-co/logos-rust-sdk).
 
-## Status
+## What you get
 
-| Phase | Description | Status |
-|-------|-------------|--------|
-| **1** | BetterSign Keycard integration (wallet traits) | **Done** (unit-tested; hardware tests optional/`#[ignore]`) |
-| **2** | Domain API | **Done** (`AccountsApi`; software integration tests) |
-| **3** | Logos module exposure | **Done** (LIDL + packaging; `cargo test` in `rust-lib/`) |
-
-Phase 1 provides `KeycardWallet` implementing BetterSign async (and sync) `KeyManager` + `MultiSigner` with hybrid software-ephemeral / Keycard-long-lived crypto.
-
-Phase 2 provides `AccountsApi` — an IPC-friendly service (multibase strings / JSON ops) over the wallet for create/load/update/verify/export.
-
-Phase 3 packages the library as a Logos module (`metadata.json`, `CMakeLists.txt`, `flake.nix`, `rust-lib/logos_accounts_module.lidl`) with `AccountsModuleImpl` implementing the generated provider trait.
+| Layer | What |
+|-------|------|
+| **Wallet** | `KeycardWallet` implements BetterSign `KeyManager` + `MultiSigner` (hybrid crypto: software ephemerals, hardware `/pubkey`) |
+| **Domain API** | `AccountsApi` — create / load / update / verify / export with multibase strings and JSON ops |
+| **Storage choice** | Caller picks `local` or `keycard` when creating or loading an account (no separate connect step) |
+| **Logos module** | LIDL contract + `AccountsModuleImpl` plugin packaging |
 
 ## Dependencies
 
@@ -26,254 +21,132 @@ bs              = { git = "https://github.com/cryptidtech/bs", branch = "main" }
 logos-rust-sdk  = { git = "https://github.com/logos-co/logos-rust-sdk", branch = "master" }
 ```
 
-## Architecture overview
+Optional Cargo feature: **`pcsc`** — real PC/SC Keycard transport (hardware tests are `#[ignore]`).
+
+## Architecture
 
 BetterSign defines extension points we implement rather than fork:
 
 | Layer | Crate | Role |
 |-------|-------|------|
-| Generic traits | `bs-traits` | `Signer`, `Verifier`, `GetKey`, `EphemeralKey`, sync/async variants, `AsyncKeyManager`, `AsyncMultiSigner` |
+| Generic traits | `bs-traits` | `Signer`, `Verifier`, `GetKey`, `EphemeralKey`, async/sync variants |
 | Opinionated supertraits | `bs::config::{sync,asynchronous}` | `KeyManager<E>`, `MultiSigner<E>` fixed to `Key` / `Codec` / `Multikey` / `Multisig` |
-| Reference wallet | `bs-wallets::memory::InMemoryKeyManager` | Full sync+async impl of both supertraits |
-| Orchestration | `bs::BetterSign`, `open_plog`, `update_plog` | Create/update p-logs; consume `KeyManager` + `MultiSigner` |
+| Reference wallet | `bs-wallets::memory::InMemoryKeyManager` | Software backend for local storage and tests |
+| Orchestration | `bs::BetterSign`, `open_plog`, `update_plog` | Create/update p-logs |
 
-Keycard (`nexum-keycard`) is **secp256k1-only**, signs a **32-byte prehash**, and does not need to export private keys for normal operation (`export_key` public-only + `sign`).
-
-Delivery order:
-
-1. **Keycard wallet traits** → plug into BetterSign
-2. **Domain API** → IPC-friendly service (**WIP**)
-3. **Logos module** → LIDL + plugin packaging (**WIP**)
-
----
-
-## Phase 1 — BetterSign Keycard integration (traits)
-
-**Goal:** A type that satisfies `bs::config::asynchronous::{KeyManager, MultiSigner}` (and preferably the sync pair) so it can be passed into `BetterSign::new` / `open_plog` / `update_plog` with **no changes to `bs`**.
-
-### 1.1 Module layout (library first)
-
-Keep a pure Rust library core before Logos packaging:
-
-```
-src/
-  lib.rs
-  error.rs                 # Error: BsCompatibleError + Keycard/APDU/IO
-  convert.rs               # k256/Multikey/Multisig bridges
-  path_map.rs              # provenance_log::Key ↔ BIP32 DerivationPath
-  keycard_session.rs       # Arc<Mutex<Keycard<…>>> lifecycle
-  wallet.rs                # KeycardWallet: KeyManager + MultiSigner
-  verifier.rs              # Software Multikey verifier (optional helper)
+```text
+Logos host
+  └─ AccountsModuleImpl  (LIDL)
+        ├─ local  → SoftwareAccountsApi (InMemoryKeyManager)
+        └─ keycard → AccountsApi<KeycardWallet>  (pcsc)
+              └─ BetterSign open / update / verify
 ```
 
-Later (Phase 3) the crate moves under `rust-lib/` for the Logos builder layout; Phase 1 stays at repo root to iterate faster.
+Keycard is **secp256k1-only**, signs a **32-byte prehash**, and exports **public keys only** for normal operation.
 
-### 1.2 Concrete types (must match `bs::config`)
+### Hybrid crypto
 
-Associated types must be exactly:
+Keycard cannot safely model destroy-after-use ephemeral keys required for VLAD binding:
 
-| Trait associated type | Concrete type |
-|----------------------|---------------|
-| `KeyPath` | `provenance_log::Key` |
-| `Codec` | `multicodec::Codec` |
-| `Key` / `PubKey` | `multikey::Multikey` |
-| `Signature` | `multisig::Multisig` (`bs::Signature`) |
-| `Error` | project `Error` implementing `bs::error::BsCompatibleError` |
+| Key role | Storage | Mechanism |
+|----------|---------|-----------|
+| VLAD / first-entry ephemeral | Software one-shot | `prepare_ephemeral_signing` |
+| Long-lived `/pubkey` | Keycard BIP32 path (default `m/44'/60'/0'/0/0`) | `export_key(PublicKeyOnly)` + `sign` on SHA-256 prehash |
+| Verification | Software | Multikey `verify_view()` — no card I/O |
 
-Reference: `bs-wallets` `memory.rs` and `async_memory.rs`.
-
-### 1.3 Traits to implement
-
-Implement on a single `KeycardWallet<T: CardTransport>` (mirrors `InMemoryKeyManager` doing both roles):
-
-**Key management**
-
-- `GetKey` + `bs_traits::sync::SyncGetKey`
-- `bs_traits::asyncro::AsyncKeyManager` (async wrappers; optional `preprocess_vlad` no-op or persist VLAD)
-
-**Signing**
-
-- `Signer` + `EphemeralKey`
-- `bs_traits::sync::SyncSigner` + `SyncPrepareEphemeralSigning`
-- `bs_traits::asyncro::AsyncSigner` + `AsyncMultiSigner`
-
-**Verification (software)**
-
-- `Verifier` + `SyncVerifier` / `AsyncVerifier` — pure Multikey `verify_view()`; no card I/O.
-- Verification is not required by `MultiSigner` for `open_plog` / `update_plog`, but is required product-wise to verify signatures in VLADs and p-logs using Multikeys stored in the log.
-
-Blanket impls in `bs::config` then make `KeycardWallet` a `KeyManager` + `MultiSigner`.
-
-### 1.4 Hybrid crypto model (critical design choice)
-
-Keycard cannot safely model **destroy-after-use ephemeral keys** the way BetterSign requires for VLAD + first-entry binding.
-
-| Key role | Path (convention) | Where it lives | How produced |
-|----------|-------------------|----------------|--------------|
-| VLAD ephemeral | (not stored) | **Software one-shot** | `prepare_ephemeral_signing` → software `Secp256K1Priv`, sign once, drop secret |
-| First-entry ephemeral (`/entrykey`) | (not stored long-term) | **Software one-shot** | same |
-| Long-lived advertised key (`/pubkey`) | mapped BIP32 path (e.g. `m/44'/60'/0'/0/0`) | **Keycard** | `get_key` → `export_key(PublicKeyOnly)` → Multikey pub |
-| Subsequent entry proofs | `entry_signing_key` usually `/pubkey` | **Keycard** | `try_sign` → card `sign` |
-
-This matches `open_plog` / `update_plog` usage:
-
-- **Open:** two `prepare_ephemeral_signing` calls (VLAD + first entry) + `key_manager.get_key` for `/pubkey`.
-- **Update:** `signer.try_sign(entry_signing_key, entry_bytes)` with `/pubkey` after first-entry key is removed.
-
-**Config constraint:** all codecs must be secp256k1 (`Codec::Secp256K1Priv` for keygen params). Ed25519 from upstream tests is **not** supported on Keycard.
-
-### 1.5 Signing / Multisig conversion
-
-Keycard `sign` requires exactly 32 bytes. Multikey secp256k1 software signing uses k256 `try_sign(msg)`, which **SHA-256-hashes** the message first, then ECDSA-signs. Match that:
+### Signing
 
 1. `digest = SHA-256(data)`
-2. `card.sign(&digest, &derivation_path, confirm=false)`
-3. Build `Multisig` with `ms::Builder::new(Codec::Es256KMsig).with_signature_bytes(&sig.to_bytes()).try_build()`
-4. Optionally verify with exported Multikey public key before returning
+2. Card `sign(digest, derivation_path, confirm=false)`
+3. Build Multisig `Es256KMsig` from the signature bytes
 
-Public key export path:
+## Key storage
 
-1. `export_key(ExportOption::PublicKeyOnly, path)` → `k256::PublicKey`
-2. Compressed SEC1 (33 bytes) into Multikey attributes with `Codec::Secp256K1Pub`
-3. Fingerprint path mapping like `InMemoryKeyManager` (`paths: Key → fingerprint`, `keys: fingerprint → Multikey pub`)
+Storage is selected when **creating** or **loading** an account.
 
-### 1.6 Session and path map
+| Method | Use case | Key material |
+|--------|----------|--------------|
+| **`local`** | Tests, CI, no hardware | In-memory Multikeys (`InMemoryKeyManager`) |
+| **`keycard`** | Production hardware-backed accounts | Master key on card; one card ↔ one account lifecycle |
 
-```rust
-// Conceptual shape
-struct KeycardWallet<T: CardTransport> {
-    card: Arc<Mutex<Keycard<CardExecutor<KeycardSecureChannel<T>>>>>,
-    /// logical plog path → BIP32 path on card
-    path_map: Mutex<HashMap<Key, DerivationPath>>,
-    /// path → public Multikey cache (never private material from card)
-    pub_cache: Mutex<HashMap<Key, Multikey>>,
+### Storage JSON (LIDL / module)
+
+**Create — local**
+
+```json
+{ "method": "local" }
+```
+
+**Create — keycard** (virgin card; missing secrets are generated)
+
+```json
+{
+  "method": "keycard",
+  "pin": "123456",
+  "puk": "123456789012",
+  "pairing_password": "…",
+  "derivation_path": "m/44'/60'/0'/0/0"
 }
 ```
 
-- Construction: follow `nexum-keycard-signer::KeycardSigner::with_known_credentials` (PIN + pairing key/index + transport).
-- Default map `/pubkey` → configurable derivation path (default `m/44'/60'/0'/0/0`).
-- `get_key` for unmapped paths: prefer explicit registration (reject or allocate policy TBD).
-- `prepare_ephemeral_signing`: **ignore the card**; generate software key with `multikey::Builder::new_from_random_bytes(Codec::Secp256K1Priv, …)` and a `FnOnce` signer. Reject non-secp256k1 codecs.
+**Load — keycard** (use credentials returned from create)
 
-### 1.7 Error type
-
-Must implement `BsCompatibleError`:
-
-- `From<OpenError, UpdateError, PlogError, io::Error, multicid::Error, multikey::Error, multihash::Error, bs::Error>`
-- `Debug` + `ToString`
-- Plus `From<nexum_keycard::Error>` / transport errors
-
-### 1.8 Dependencies to add (Phase 1)
-
-Beyond existing git deps:
-
-- Explicit: `bs-traits`, `multikey`, `multisig`, `multicodec`, `multicid`, `multihash`, `provenance-log`
-- `nexum-apdu-core` (transport bounds)
-- Optional feature `pcsc`: `nexum-apdu-transport-pcsc`
-- `bip32`, `k256`, `sha2`, `thiserror`, `tokio` (`sync` mutex), `tracing`
-- Dev: mock transport / software-only tests; hardware tests gated on `pcsc`
-
-### 1.9 Phase 1 verification
-
-- Unit tests: software-only ephemeral + Multikey verify roundtrip (no card)
-- Unit tests: convert helpers (SEC1 ↔ Multikey, signature ↔ Multisig, SHA-256 prehash)
-- Optional `#[ignore]` hardware test: open plog + update on real Keycard; `plog.verify()` succeeds
-- Compile-time check: `fn assert_wallet<W: KeyManager<E> + MultiSigner<E>>()`
-
----
-
-## Phase 2 — Domain API
-
-> **Status: Done.** See `src/api.rs`, `src/config.rs`, `src/encoding.rs`.
-
-**Goal:** A small, IPC-friendly service API that other code (and later LIDL) calls, without exposing trait generics across the module boundary.
-
-### 2.1 Service type
-
-```text
-AccountsApi
-  owns: KeycardWallet, BetterSign<KeycardWallet, KeycardWallet, Error> (or Option until open)
-  config defaults: secp256k1 open/update scripts matching bs tests
+```json
+{
+  "method": "keycard",
+  "pin": "123456",
+  "pairing_key_hex": "…",
+  "pairing_index": 0
+}
 ```
 
-Suggested methods (serialize-friendly; binary as `Vec<u8>` or multibase `String`):
+### Keycard lifecycle
+
+Creating an account with keycard storage **requires a virgin card** and binds the card to that account:
+
+1. SELECT + virgin check  
+2. INIT (PIN / PUK / pairing password)  
+3. Pair → open secure channel  
+4. GENERATE KEY  
+5. Open p-log (`BetterSign::new`)  
+6. Store **`SHA-256(multibase VLAD)`** (32 bytes) on the card public record  
+
+Load verifies that the on-card hash matches the p-log VLAD. Card identity is **not** written into the first p-log entry.
+
+Keycard create responses include credentials (PIN, PUK, pairing key/index) so the host can persist them for later loads. Treat that JSON as sensitive.
+
+To create a new account on a previously used card, factory-reset it first (e.g. via `nexum-keycard-cli`). Factory reset is not part of this module.
+
+## Domain API
+
+`AccountsApi<W>` is the library service (generics stay inside the crate). Typical surface:
 
 | Method | Responsibility |
 |--------|----------------|
-| `connect(pin, pairing_key, pairing_index)` | Build session / secure channel |
-| `card_status()` | App status / key UID / path |
-| `ensure_key(derivation_path)` | Map `/pubkey` and confirm export |
-| `create_account()` | `BetterSign::new(open_config, km, signer)` → VLAD + head CID + first entry |
-| `load_account(plog_bytes)` | Deserialize `Log`, wrap in `BetterSign::from_parts` |
-| `update_account(ops…)` | `BetterSign::update` with entry signing key `/pubkey` |
-| `rotate_pubkey(new_path or generate)` | Update ops + path map (rotation policy TBD) |
-| `vlad()` / `public_key()` | Read current identity material |
-| `verify_entry` / `verify_plog()` | Software verify via Multikey + `plog.verify()` |
-| `verify_signature(pubkey, msg, multisig)` | Direct Multikey verify (VLAD/plog proof helper) |
-| `export_plog()` | Serialize log for persistence |
+| `attach_wallet` / `SoftwareAccountsApi::software()` | Library: attach local or custom wallet |
+| `create_account` | Open a new p-log |
+| `create_account_on_virgin_keycard` | Full virgin Keycard create + VLAD hash tag |
+| `load_account` / `load_account_on_keycard` | Load p-log; Keycard path checks VLAD hash |
+| `update_account` / `update_account_ops` | Append ops, sign with `/pubkey` |
+| `export_plog` / `vlad` / `public_key` | Identity and export |
+| `verify_plog` / `verify_signature` | Software verification |
+| `rotate_pubkey` | Library-only Keycard path rebind + plog KeyGen |
 
-### 2.2 Default open config
+Default open config uses secp256k1 for VLAD, first-entry, and `/pubkey`, with lock/unlock scripts matching BetterSign conventions:
 
-Mirror `bs` tests but with **secp256k1**:
-
-- `VladParams` + `FirstEntryKeyParams` + `PubkeyParams` all `Codec::Secp256K1Priv`
 - Lock: `check_signature("/pubkey", "/entry/")`
 - Unlock: `push("/entry/"); push("/entry/proof")`
 
-### 2.3 Persistence hooks
+## Logos module (LIDL)
 
-- Pairing material and plog paths prepared for Logos `instance_persistence_path` (Phase 3); Phase 2 can use explicit paths or memory only.
-- Never persist private keys (card holds them).
-
-### 2.4 Phase 2 verification
-
-- Integration test: create → update → verify chain → export/import
-- Property: VLAD signature verifies against first-entry VLAD key material; entry proofs verify against `/pubkey`
-
----
-
-## Phase 3 — Logos module exposure
-
-> **Status: Done.** Layout matches `logos-rust-sdk` `rust-calc`; local tests: `cd rust-lib && cargo test`.
-
-**Goal:** Wrap the API as a loadable Logos plugin so peer modules get a **typed client** from LIDL.
-
-### 3.1 Repo reshape (Logos builder path)
-
-```
-logos-accounts/
-  metadata.json
-  CMakeLists.txt
-  flake.nix
-  rust-lib/
-    Cargo.toml              # name = logos_accounts, crate-type = ["rlib","staticlib"]
-    logos_accounts_module.lidl
-    generated/provider_gen.rs   # checked-in scaffold (builder may overwrite)
-    src/
-      lib.rs                # include scaffold; logos_module_install
-      module.rs             # AccountsModuleImpl → SoftwareAccountsApi
-      … (Phase 1–2 modules)
-```
-
-Builder supplies/pins `logos-rust-sdk` in production builds; `rust-lib` keeps an explicit git dep for local `cargo test`.
-
-### 3.2 LIDL contract (public surface)
-
-Draft contract (names may change):
+Public contract (`rust-lib/logos_accounts_module.lidl`, version **1.1.0**):
 
 ```text
 module logos_accounts_module {
-  version "1.0.0"
-  description "BetterSign accounts backed by Keycard hardware"
-
-  method connect(pin: string, pairing_key_hex: string, pairing_index: int) -> string
-  method card_status() -> string
-
-  method create_account() -> string          // JSON: vlad, head_cid, pubkey
-  method load_account(plog_b64: string) -> string
+  method create_account(storage_json: string) -> string
+  method load_account(plog_b64: string, storage_json: string) -> string
   method update_account(ops_json: string) -> string
   method export_plog() -> string
-
   method get_vlad() -> string
   method get_public_key() -> string
   method verify_plog() -> bool
@@ -285,88 +158,78 @@ module logos_accounts_module {
 }
 ```
 
-LIDL is the ABI other Logos modules depend on. Complex types cross the boundary as **strings** (JSON / multibase) for language neutrality.
+Complex types cross the boundary as **strings** (JSON / multibase). Keycard create may return `keycard` credentials alongside `vlad` / `head_cid` / `pubkey`.
 
-### 3.3 Provider impl
+`AccountsModuleImpl` maps LIDL methods onto local or Keycard backends. Install hook: `logos_module_install()`.
 
-```rust
-include!(concat!(env!("CARGO_MANIFEST_DIR"), "/generated/provider_gen.rs"));
+### Packaging
 
-struct AccountsModuleImpl {
-    api: AccountsApi, // or Option / OnceLock for lazy connect
-}
+| File | Role |
+|------|------|
+| `metadata.json` | Logos module metadata and codegen paths |
+| `CMakeLists.txt` | `logos_module(NAME logos_accounts_module)` |
+| `flake.nix` | Nix packaging via logos-module-builder |
+| `rust-lib/generated/provider_gen.rs` | Checked-in LIDL provider scaffold |
 
-impl LogosAccountsModule for AccountsModuleImpl {
-    // map LIDL methods → AccountsApi
-}
+## Repository layout
 
-#[no_mangle]
-pub extern "Rust" fn logos_module_install() {
-    install::<AccountsModuleImpl>();
-}
+```text
+logos-accounts/
+  metadata.json
+  CMakeLists.txt
+  flake.nix
+  rust-lib/
+    Cargo.toml
+    logos_accounts_module.lidl
+    generated/provider_gen.rs
+    src/
+      lib.rs                 # crate root, re-exports, install hook
+      module.rs              # AccountsModuleImpl
+      api.rs                 # AccountsApi
+      storage.rs             # StorageConfig JSON
+      binding.rs             # VLAD hash binding helpers
+      keycard_lifecycle.rs   # virgin init + pair + generate key
+      keycard_session.rs     # shared Keycard handle, public data I/O
+      wallet.rs              # KeycardWallet traits
+      path_map.rs            # logical Key ↔ BIP32
+      config.rs              # default open/update configs
+      convert.rs             # Multikey / Multisig / prehash bridges
+      encoding.rs            # multibase / hex IPC helpers
+      verifier.rs            # software Multikey verify
+      error.rs
 ```
 
-Use generated `context()` for `instance_persistence_path` to store pairing info + last plog export.
+## Design decisions
 
-### 3.4 Packaging files
+1. **Ephemeral keys stay in software**; Keycard holds long-lived `/pubkey` only.  
+2. **secp256k1 only** for hardware-backed accounts.  
+3. **SHA-256 prehash** before Keycard `sign` (matches Multikey Es256K).  
+4. **Storage chosen at create/load** — no global connect lifecycle.  
+5. **One virgin Keycard per account create**; card stores VLAD hash only for wrong-card detection.  
+6. **LIDL types as encoded strings** (JSON / multibase).  
+7. **Hardware tests optional** — CI does not require a physical card.
 
-- **`metadata.json`**: `interface: "cdylib"`, `codegen.lidl` + `codegen.rust`, PC/SC native libs as needed
-- **`CMakeLists.txt`**: `logos_module(NAME logos_accounts_module)` via `LogosModule.cmake`
-- **`flake.nix`**: `logos-module-builder` + `logos-rust-sdk` inputs; `mkLogosModule`
+## Building and testing
 
-### 3.5 Consuming from other modules
-
-```rust
-// Concrete dependency
-modules().logos_accounts_module.create_account()...
-
-// Or interface bind if an interface contract is published later
-// LogosAccountsClient::bind("logos_accounts_module")...
+```bash
+cd rust-lib && cargo test
 ```
 
-### 3.6 Phase 3 verification
+Software paths (local storage) run without hardware. Optional:
 
-- `cd rust-lib && cargo test` — **22 tests pass** (wallet + API + module LIDL mapping)
-- Builder / `nix build` of the module package when `logos-module-builder` toolchain is available
-- Optional caller module exercising `create_account` / `verify_plog` through logoscore
+```bash
+cargo test --features pcsc -- --ignored
+```
 
----
+Requires a PC/SC reader, a virgin or appropriately provisioned Keycard, and env vars for existing hardware tests (e.g. `KEYCARD_PIN`, `KEYCARD_PAIRING_KEY`, `KEYCARD_PAIRING_INDEX`).
 
-## Critical files
+Nix / builder packaging: use the repo `flake.nix` when `logos-module-builder` is available.
 
-| Path | Action |
-|------|--------|
-| `rust-lib/Cargo.toml` | Lib deps; features `pcsc` |
-| `rust-lib/src/wallet.rs` (etc.) | Keycard trait implementations |
-| `rust-lib/src/api.rs` | Domain API |
-| `rust-lib/logos_accounts_module.lidl` | Public Logos contract |
-| `rust-lib/src/module.rs` + `lib.rs` | Module trait impl + install hook |
-| `metadata.json`, `CMakeLists.txt`, `flake.nix` | Logos packaging |
+## Out of scope
 
-## Existing code to reuse
-
-| What | Where |
-|------|--------|
-| Trait surface & associated-type targets | `bs-traits`, `bs::config::{sync,asynchronous}` |
-| Reference wallet behavior | `bs-wallets::memory::InMemoryKeyManager` (+ `async_memory`) |
-| Open/update orchestration | `bs::BetterSign`, `bs::ops::{open,update}` |
-| Sync→async adapters | `bs::config::adapters::{SyncToAsyncManager,SyncToAsyncSigner}` |
-| Card session + sign/export | `nexum_keycard::Keycard`, `ExportOption`, `sign` |
-| Session pattern | `nexum-keycard-signer::KeycardSigner` (pattern only; no Ethereum types in core wallet) |
-| Multisig/Multikey secp256k1 | `multikey` secp256k1 views, `Codec::Es256KMsig` |
-| Logos provider authoring | SDK doctest `rust-calc` (`trait impl` + `logos_module_install` + `metadata.json`) |
-
-## Decisions locked in
-
-1. **Ephemeral keys stay in software**; Keycard is for long-lived `/pubkey` signing only (VLAD security model requires destroyable ephemeral secrets).
-2. **secp256k1 only** for hardware-backed accounts.
-3. **SHA-256 prehash** before Keycard `sign` to match Multikey Es256K verification.
-4. **Cross-module types as encoded strings** in LIDL v1 (JSON/multibase), not raw Multikey structs.
-5. **Hardware tests optional/gated**; CI should not require a physical card.
-
-## Out of scope (initial delivery)
-
-- Full Keycard lifecycle UI (init/pair/PIN change) beyond connect with known credentials (use `nexum-keycard-cli`)
-- Multi-threshold / Lamport VLAD paths
-- Encryption / secret-sharing traits (`Encryptor` / `SecretSplitter`)
-- IPFS/DHT publication of plogs (local/export only at first)
+- Factory-reset API inside the module (use `nexum-keycard-cli`)  
+- PIN change, unpair UI, multi-account per card  
+- Multi-threshold / Lamport VLAD paths  
+- Encryption / secret-sharing traits  
+- Network publication of p-logs (export only)  
+- File-encrypted local keystore (local storage is in-memory for testing)

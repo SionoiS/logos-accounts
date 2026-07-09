@@ -1,17 +1,20 @@
-//! Domain API: IPC-friendly service surface for BetterSign + Keycard accounts.
+//! Domain API: IPC-friendly service surface for BetterSign accounts.
 //!
-//! Hides BetterSign trait generics behind concrete methods that exchange
-//! multibase strings / bytes — ready for Phase 3 LIDL mapping.
+//! Key storage is selected when creating or loading an account (local software
+//! wallet or Keycard). There is no separate connect / card_status lifecycle.
 
 use crate::config::{
     default_open_config, default_update_config, pubkey_key_path, update_config_with_ops,
 };
 use crate::encoding::{
     decode_bytes_multibase, decode_hex32, decode_multikey, decode_multisig, decode_plog,
-    encode_cid, encode_hex, encode_multikey, encode_plog, encode_vlad, plog_from_bytes,
-    plog_to_bytes,
+    encode_cid, encode_multikey, encode_plog, encode_vlad, plog_from_bytes, plog_to_bytes,
+};
+use crate::keycard_lifecycle::{
+    initialize_virgin_keycard, open_and_verify_binding, store_vlad_binding, KeycardCreateSecrets,
 };
 use crate::path_map::DEFAULT_PUBKEY_PATH;
+use crate::storage::CreateAccountResult;
 use crate::verifier::verify_multikey;
 use crate::wallet::{default_pubkey_key, KeycardWallet};
 use crate::Error;
@@ -34,23 +37,6 @@ pub struct AccountSummary {
     pub head_cid: String,
     /// Multibase Multikey public key for `/pubkey` (when available).
     pub pubkey: Option<String>,
-}
-
-/// Card status snapshot for IPC.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct CardStatus {
-    /// PIN retries remaining.
-    pub pin_retry_count: u8,
-    /// PUK retries remaining.
-    pub puk_retry_count: u8,
-    /// Whether a master key is initialized on the card.
-    pub key_initialized: bool,
-    /// Key UID hex (if present).
-    pub key_uid_hex: Option<String>,
-    /// Applet version display string (if available).
-    pub version: Option<String>,
-    /// BIP32 path currently mapped to `/pubkey`.
-    pub pubkey_derivation: String,
 }
 
 /// Serializable account ops for `update_account` (maps to BetterSign `OpParams`).
@@ -370,75 +356,60 @@ impl<T> AccountsApi<KeycardWallet<T>>
 where
     T: CardTransport + 'static,
 {
-    /// Connect using a transport and known credentials; maps `/pubkey` to `pubkey_derivation`.
-    pub fn connect(
-        &mut self,
+    /// Create an account on a **virgin** Keycard: INIT → pair → GENERATE KEY → open p-log →
+    /// store VLAD hash on the card.
+    ///
+    /// Returns the API with wallet + account loaded, plus credentials for later loads.
+    pub async fn create_account_on_virgin_keycard(
         transport: T,
-        pin: impl Into<String>,
-        pairing_key: [u8; 32],
-        pairing_index: u8,
+        secrets: KeycardCreateSecrets,
         pubkey_derivation: Option<&str>,
-    ) -> Result<(), Error> {
-        let derivation = pubkey_derivation.unwrap_or(DEFAULT_PUBKEY_PATH);
-        let wallet = KeycardWallet::with_known_credentials(
-            transport,
-            pin,
-            pairing_key,
-            pairing_index,
-            Some(derivation),
-        )?;
-        self.pubkey_derivation = derivation.to_string();
-        self.wallet = Some(wallet);
-        self.account = None;
-        Ok(())
+    ) -> Result<(Self, CreateAccountResult), Error> {
+        let initialized =
+            initialize_virgin_keycard(transport, secrets, pubkey_derivation)?;
+        let derivation = initialized.derivation_path.clone();
+        let (wallet, credentials) = initialized.into_wallet()?;
+
+        let mut api = Self::new();
+        api.attach_wallet(wallet, Some(&derivation));
+        let summary = api.create_account().await?;
+
+        // Bind card to this VLAD (fail the whole operation if store fails).
+        let vlad = api.require_account_ref()?.plog().vlad.clone();
+        {
+            let wallet = api.require_wallet_ref()?;
+            store_vlad_binding(wallet.session(), &vlad).await?;
+        }
+
+        let result = CreateAccountResult::with_keycard(summary, credentials);
+        Ok((api, result))
     }
 
-    /// Connect with pairing key given as hex.
-    pub fn connect_hex(
-        &mut self,
+    /// Load a p-log on a Keycard after verifying the on-card VLAD hash matches.
+    pub async fn load_account_on_keycard(
         transport: T,
+        plog_multibase: &str,
         pin: impl Into<String>,
         pairing_key_hex: &str,
         pairing_index: u8,
         pubkey_derivation: Option<&str>,
-    ) -> Result<(), Error> {
-        let key = decode_hex32(pairing_key_hex)?;
-        self.connect(transport, pin, key, pairing_index, pubkey_derivation)
-    }
+    ) -> Result<Self, Error> {
+        let log = decode_plog(plog_multibase)?;
+        let pairing_key = decode_hex32(pairing_key_hex)?;
+        let wallet = open_and_verify_binding(
+            transport,
+            pin,
+            pairing_key,
+            pairing_index,
+            &log.vlad,
+            pubkey_derivation,
+        )
+        .await?;
 
-    /// Card application status + `/pubkey` derivation.
-    pub async fn card_status(&self) -> Result<CardStatus, Error> {
-        let wallet = self.require_wallet_ref()?;
-        let status = wallet.session().get_status().await?;
-        let info = wallet.session().application_info().await.ok();
-        Ok(CardStatus {
-            pin_retry_count: status.pin_retry_count,
-            puk_retry_count: status.puk_retry_count,
-            key_initialized: status.key_initialized,
-            key_uid_hex: info
-                .as_ref()
-                .and_then(|i| i.key_uid.map(|u| encode_hex(&u))),
-            version: info.as_ref().map(|i| i.version.to_string()),
-            pubkey_derivation: self.pubkey_derivation.clone(),
-        })
-    }
-
-    /// Map `/pubkey` to `derivation_path` (or keep current) and export the public Multikey.
-    pub async fn ensure_key(&mut self, derivation_path: Option<&str>) -> Result<String, Error> {
-        let path = derivation_path
-            .unwrap_or(self.pubkey_derivation.as_str())
-            .to_string();
-        let key = default_pubkey_key();
-        {
-            let wallet = self.require_wallet_ref()?;
-            wallet.rebind_path(key.clone(), &path)?;
-        }
-        self.pubkey_derivation = path;
-        let wallet = self.require_wallet_ref()?;
-        let thr = NonZeroUsize::new(1).unwrap();
-        let mk =
-            AsyncGetKeyTrait::get_key(wallet, &key, &Codec::Secp256K1Priv, thr, thr).await?;
-        Ok(encode_multikey(&mk))
+        let mut api = Self::new();
+        api.attach_wallet(wallet, pubkey_derivation);
+        api.load_account_log(log).await?;
+        Ok(api)
     }
 
     /// Rotate `/pubkey` to a new BIP32 path: rebind, export, and commit via plog update.

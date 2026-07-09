@@ -82,8 +82,8 @@ pub enum Error {
     #[error("{0}")]
     Message(String),
 
-    /// Wallet / card session not connected
-    #[error("not connected: call connect (or attach_wallet) first")]
+    /// No key storage wallet attached
+    #[error("no key storage: attach a wallet or create/load an account with a storage method first")]
     NotConnected,
 
     /// No account loaded or created
@@ -97,6 +97,16 @@ pub enum Error {
     /// Invalid account operation / policy
     #[error("invalid operation: {0}")]
     InvalidOp(String),
+
+    /// Keycard is already initialized or has a master key (create requires a virgin card)
+    #[error(
+        "keycard is not virgin: factory-reset the card before creating a new account ({0})"
+    )]
+    KeycardNotVirgin(String),
+
+    /// Connected Keycard VLAD hash does not match the loaded p-log
+    #[error("keycard does not match this account: {0}")]
+    CardBindingMismatch(String),
 
     /// bs-wallets error (software wallet path / tests)
     #[error(transparent)]

@@ -1,12 +1,9 @@
 module logos_accounts_module {
-  version "1.0.0"
-  description "BetterSign accounts backed by Keycard hardware"
+  version "1.1.0"
+  description "BetterSign accounts with pluggable key storage (local or Keycard)"
 
-  method connect(pin: string, pairing_key_hex: string, pairing_index: int) -> string
-  method card_status() -> string
-
-  method create_account() -> string
-  method load_account(plog_b64: string) -> string
+  method create_account(storage_json: string) -> string
+  method load_account(plog_b64: string, storage_json: string) -> string
   method update_account(ops_json: string) -> string
   method export_plog() -> string
 

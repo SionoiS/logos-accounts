@@ -3,7 +3,7 @@
 use crate::Error;
 use bip32::DerivationPath;
 use nexum_apdu_core::prelude::{CardExecutor, CardTransport};
-use nexum_keycard::{ExportOption, Keycard, KeycardSecureChannel, PairingInfo};
+use nexum_keycard::{ExportOption, Keycard, KeycardSecureChannel, PairingInfo, PersistentRecord};
 use std::sync::Arc;
 use tokio::sync::Mutex;
 
@@ -118,6 +118,19 @@ where
     pub async fn application_info(&self) -> Result<nexum_keycard::ApplicationInfo, Error> {
         let mut card = self.card.lock().await;
         Ok(card.select_keycard()?)
+    }
+
+    /// Store data in the card's public persistent record (e.g. VLAD binding hash).
+    pub async fn store_public_data(&self, data: &[u8]) -> Result<(), Error> {
+        let mut card = self.card.lock().await;
+        card.store_data(PersistentRecord::Public, data)?;
+        Ok(())
+    }
+
+    /// Read the card's public persistent record.
+    pub async fn get_public_data(&self) -> Result<Vec<u8>, Error> {
+        let mut card = self.card.lock().await;
+        Ok(card.get_data(PersistentRecord::Public)?)
     }
 }
 
