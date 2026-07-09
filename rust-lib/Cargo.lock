@@ -2236,7 +2236,7 @@ dependencies = [
 
 [[package]]
 name = "logos_accounts"
-version = "1.0.0"
+version = "0.1.0"
 dependencies = [
  "alloy-primitives",
  "bip32",

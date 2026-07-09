@@ -86,9 +86,15 @@ pub enum Error {
     #[error("no key storage: attach a wallet or create/load an account with a storage method first")]
     NotConnected,
 
-    /// No account loaded or created
+    /// No account loaded or created (single-account domain API)
     #[error("no account loaded: call create_account or load_account first")]
     NoAccount,
+
+    /// No p-log in the local cache for this VLAD
+    #[error(
+        "no cached p-log for this VLAD (hash {0}): call create_account or import_plog first"
+    )]
+    AccountNotCached(String),
 
     /// Encoding / decoding failure (multibase, JSON, …)
     #[error("encoding error: {0}")]

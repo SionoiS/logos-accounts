@@ -1,6 +1,6 @@
 [package]
 name = "logos_accounts"
-version = "1.0.0"
+version = "0.1.0"
 edition = "2024"
 description = "BetterSign accounts with pluggable key storage (local or Keycard), exposed as a Logos module"
 license = "MIT OR Apache-2.0"

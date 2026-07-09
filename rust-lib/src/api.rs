@@ -1,7 +1,9 @@
-//! Domain API: IPC-friendly service surface for BetterSign accounts.
+//! Domain API: IPC-friendly single-account service surface for BetterSign accounts.
 //!
 //! Key storage is selected when creating or loading an account (local software
-//! wallet or Keycard). There is no separate connect / card_status lifecycle.
+//! wallet or Keycard). The Logos module layers a multi-account [`crate::AccountCache`]
+//! on top; this type remains one wallet + one p-log. There is no separate
+//! connect / card_status lifecycle.
 
 use crate::config::{
     default_open_config, default_update_config, pubkey_key_path, update_config_with_ops,

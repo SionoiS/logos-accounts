@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 
 /// How long-lived key material is stored for an account.
 ///
-/// Chosen by the caller when creating or loading an account (no separate connect step).
+/// Chosen by the caller when creating or importing an account (no separate connect step).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "method", rename_all = "snake_case")]
 pub enum StorageConfig {

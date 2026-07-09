@@ -1,15 +1,17 @@
 module logos_accounts_module {
-  version "1.1.0"
-  description "BetterSign accounts with pluggable key storage (local or Keycard)"
+  version "2.0.0"
+  description "BetterSign accounts with pluggable key storage and local p-log cache"
 
   method create_account(storage_json: string) -> string
-  method load_account(plog_b64: string, storage_json: string) -> string
-  method update_account(ops_json: string) -> string
-  method export_plog() -> string
 
-  method get_vlad() -> string
-  method get_public_key() -> string
-  method verify_plog() -> bool
+  method import_plog(plog_b64: string, storage_json: string) -> string
+  method export_plog(vlad: string) -> string
+  method remove_plog(vlad: string) -> string
+  method clear_cache() -> string
+
+  method update_account(vlad: string, ops_json: string) -> string
+  method get_public_key(vlad: string) -> string
+  method verify_plog(vlad: string) -> bool
   method verify_signature(pubkey_b64: string, message_b64: string, sig_b64: string) -> bool
 
   event account_created(vlad: string)

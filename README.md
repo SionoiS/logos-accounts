@@ -9,8 +9,9 @@ This repository implements provenance-based identity (VLADs + provenance logs / 
 | Layer | What |
 |-------|------|
 | **Wallet** | `KeycardWallet` implements BetterSign `KeyManager` + `MultiSigner` (hybrid crypto: software ephemerals, hardware `/pubkey`) |
-| **Domain API** | `AccountsApi` — create / load / update / verify / export with multibase strings and JSON ops |
-| **Storage choice** | Caller picks `local` or `keycard` when creating or loading an account (no separate connect step) |
+| **Domain API** | `AccountsApi` — single-account create / load / update / verify / export (multibase / JSON) |
+| **Local cache** | `AccountCache` — multi p-log registry keyed by SHA-256(VLAD); import / export / remove / clear |
+| **Storage choice** | Caller picks `local` or `keycard` when creating or importing an account (no separate connect step) |
 | **Logos module** | LIDL contract + `AccountsModuleImpl` plugin packaging |
 
 ## Dependencies
@@ -37,10 +38,13 @@ BetterSign defines extension points we implement rather than fork:
 ```text
 Logos host
   └─ AccountsModuleImpl  (LIDL)
-        ├─ local  → SoftwareAccountsApi (InMemoryKeyManager)
-        └─ keycard → AccountsApi<KeycardWallet>  (pcsc)
-              └─ BetterSign open / update / verify
+        └─ AccountCache  (key = SHA-256(canonical multibase VLAD))
+              ├─ local  → SoftwareAccountsApi (InMemoryKeyManager)
+              └─ keycard → AccountsApi<KeycardWallet>  (pcsc)
+                    └─ BetterSign open / update / verify
 ```
+
+The module holds **many** cached p-logs at once. Account ops take the multibase VLAD as the first argument (`operation(vlad, …)`); there is no implicit “loaded” session. Internally the map is indexed by the same 32-byte VLAD hash used for Keycard binding.
 
 Keycard is **secp256k1-only**, signs a **32-byte prehash**, and exports **public keys only** for normal operation.
 
@@ -62,7 +66,7 @@ Keycard cannot safely model destroy-after-use ephemeral keys required for VLAD b
 
 ## Key storage
 
-Storage is selected when **creating** or **loading** an account.
+Storage is selected when **creating** or **importing** an account.
 
 | Method | Use case | Key material |
 |--------|----------|--------------|
@@ -89,7 +93,7 @@ Storage is selected when **creating** or **loading** an account.
 }
 ```
 
-**Load — keycard** (use credentials returned from create)
+**Import — keycard** (use credentials returned from create)
 
 ```json
 {
@@ -111,7 +115,7 @@ Creating an account with keycard storage **requires a virgin card** and binds th
 5. Open p-log (`BetterSign::new`)  
 6. Store **`SHA-256(multibase VLAD)`** (32 bytes) on the card public record  
 
-Load verifies that the on-card hash matches the p-log VLAD. Card identity is **not** written into the first p-log entry.
+Import verifies that the on-card hash matches the p-log VLAD. Card identity is **not** written into the first p-log entry.
 
 Keycard create responses include credentials (PIN, PUK, pairing key/index) so the host can persist them for later loads. Treat that JSON as sensitive.
 
@@ -119,14 +123,14 @@ To create a new account on a previously used card, factory-reset it first (e.g. 
 
 ## Domain API
 
-`AccountsApi<W>` is the library service (generics stay inside the crate). Typical surface:
+`AccountsApi<W>` is the **single-account** library service (generics stay inside the crate). Typical surface:
 
 | Method | Responsibility |
 |--------|----------------|
 | `attach_wallet` / `SoftwareAccountsApi::software()` | Library: attach local or custom wallet |
 | `create_account` | Open a new p-log |
 | `create_account_on_virgin_keycard` | Full virgin Keycard create + VLAD hash tag |
-| `load_account` / `load_account_on_keycard` | Load p-log; Keycard path checks VLAD hash |
+| `load_account` / `load_account_on_keycard` | Load p-log into this API; Keycard path checks VLAD hash |
 | `update_account` / `update_account_ops` | Append ops, sign with `/pubkey` |
 | `export_plog` / `vlad` / `public_key` | Identity and export |
 | `verify_plog` / `verify_signature` | Software verification |
@@ -137,19 +141,34 @@ Default open config uses secp256k1 for VLAD, first-entry, and `/pubkey`, with lo
 - Lock: `check_signature("/pubkey", "/entry/")`
 - Unlock: `push("/entry/"); push("/entry/proof")`
 
+### Local p-log cache
+
+`AccountCache` stores multiple operable accounts for the Logos module:
+
+| Method | Responsibility |
+|--------|----------------|
+| `insert` / `insert_by_hash` | Upsert a session under the VLAD hash |
+| `get` / `remove` / `clear` | Lookup / drop one / drop all |
+| `key_from_multibase` / `key_from_vlad` | Canonical hash via `vlad_hash` |
+
+Wire methods still pass **full multibase VLAD** strings; hashing is an implementation detail of the index.
+
 ## Logos module (LIDL)
 
-Public contract (`rust-lib/logos_accounts_module.lidl`, version **1.1.0**):
+Public contract (`rust-lib/logos_accounts_module.lidl`, version **2.0.0**):
 
 ```text
 module logos_accounts_module {
   method create_account(storage_json: string) -> string
-  method load_account(plog_b64: string, storage_json: string) -> string
-  method update_account(ops_json: string) -> string
-  method export_plog() -> string
-  method get_vlad() -> string
-  method get_public_key() -> string
-  method verify_plog() -> bool
+
+  method import_plog(plog_b64: string, storage_json: string) -> string
+  method export_plog(vlad: string) -> string
+  method remove_plog(vlad: string) -> string
+  method clear_cache() -> string
+
+  method update_account(vlad: string, ops_json: string) -> string
+  method get_public_key(vlad: string) -> string
+  method verify_plog(vlad: string) -> bool
   method verify_signature(pubkey_b64: string, message_b64: string, sig_b64: string) -> bool
 
   event account_created(vlad: string)
@@ -158,9 +177,16 @@ module logos_accounts_module {
 }
 ```
 
+| Method | Notes |
+|--------|--------|
+| `create_account` | Creates and **inserts** into the cache; returns `vlad` for later ops |
+| `import_plog` | Replaces former `load_account`; upserts by VLAD hash |
+| `export_plog` / `remove_plog` / `clear_cache` | Cache lifecycle |
+| `update_account` / `get_public_key` / `verify_plog` | First arg is multibase VLAD |
+
 Complex types cross the boundary as **strings** (JSON / multibase). Keycard create may return `keycard` credentials alongside `vlad` / `head_cid` / `pubkey`.
 
-`AccountsModuleImpl` maps LIDL methods onto local or Keycard backends. Install hook: `logos_module_install()`.
+`AccountsModuleImpl` maps LIDL methods onto the local `AccountCache` and local or Keycard backends. Install hook: `logos_module_install()`.
 
 ### Packaging
 
@@ -184,8 +210,9 @@ logos-accounts/
     generated/provider_gen.rs
     src/
       lib.rs                 # crate root, re-exports, install hook
-      module.rs              # AccountsModuleImpl
-      api.rs                 # AccountsApi
+      module.rs              # AccountsModuleImpl (cache-backed LIDL)
+      api.rs                 # AccountsApi (single-account domain)
+      cache.rs               # AccountCache keyed by VLAD hash
       storage.rs             # StorageConfig JSON
       binding.rs             # VLAD hash binding helpers
       keycard_lifecycle.rs   # virgin init + pair + generate key
@@ -204,10 +231,12 @@ logos-accounts/
 1. **Ephemeral keys stay in software**; Keycard holds long-lived `/pubkey` only.  
 2. **secp256k1 only** for hardware-backed accounts.  
 3. **SHA-256 prehash** before Keycard `sign` (matches Multikey Es256K).  
-4. **Storage chosen at create/load** — no global connect lifecycle.  
+4. **Storage chosen at create/import** — no global connect lifecycle.  
 5. **One virgin Keycard per account create**; card stores VLAD hash only for wrong-card detection.  
 6. **LIDL types as encoded strings** (JSON / multibase).  
-7. **Hardware tests optional** — CI does not require a physical card.
+7. **Hardware tests optional** — CI does not require a physical card.  
+8. **Local multi p-log cache** indexed by `SHA-256(canonical multibase VLAD)`; wire API still uses full VLAD.  
+9. **No session load step for ops** — `operation(vlad, …)` addresses any cached account.
 
 ## Building and testing
 
@@ -232,4 +261,5 @@ Nix / builder packaging: use the repo `flake.nix` when `logos-module-builder` is
 - Multi-threshold / Lamport VLAD paths  
 - Encryption / secret-sharing traits  
 - Network publication of p-logs (export only)  
-- File-encrypted local keystore (local storage is in-memory for testing)
+- File-encrypted local keystore (local storage is in-memory for testing)  
+- Automatic filesystem write-through of the p-log cache via `persistence_path` (in-process only)

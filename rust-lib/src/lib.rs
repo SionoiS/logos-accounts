@@ -7,15 +7,19 @@
 //!
 //! # Phase 2 — domain API
 //!
-//! [`AccountsApi`] is an IPC-friendly service (multibase strings / JSON ops).
-//! Key storage is chosen at create/load via [`StorageConfig`].
+//! [`AccountsApi`] is an IPC-friendly single-account service (multibase strings / JSON ops).
+//! Key storage is chosen at create/import via [`StorageConfig`].
 //!
-//! # Phase 3 — Logos module
+//! # Phase 3 — Logos module + local p-log cache
 //!
 //! This crate is the `rust-lib` half of a Logos module package. The builder
 //! (or checked-in scaffold) generates `generated/provider_gen.rs` from
 //! `logos_accounts_module.lidl`. [`module::AccountsModuleImpl`] implements the
 //! generated trait and is installed via [`logos_module_install`].
+//!
+//! The module holds an in-process [`AccountCache`] of p-logs, indexed by
+//! SHA-256 of the canonical multibase VLAD. Account operations take
+//! `operation(vlad, …)` — no implicit “loaded” session.
 
 #![deny(missing_docs)]
 
@@ -35,6 +39,7 @@ pub use provider_scaffold::{
 
 mod api;
 mod binding;
+mod cache;
 mod config;
 mod convert;
 mod encoding;
@@ -54,6 +59,7 @@ pub use binding::{
     parse_card_vlad_hash, verify_card_vlad_binding, vlad_hash, vlad_hash_from_multibase,
     VLAD_HASH_LEN,
 };
+pub use cache::{AccountCache, CachedAccount, VladHash};
 pub use config::{
     default_open_config, default_update_config, pubkey_key_path, update_config_with_ops,
     DEFAULT_ENTRY_LOCK, DEFAULT_ENTRY_UNLOCK,
