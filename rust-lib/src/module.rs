@@ -175,14 +175,23 @@ impl AccountsModuleImpl {
         ) {
             Ok(api) => {
                 let summary = match api.has_account() {
-                    true => AccountSummary {
-                        vlad: api.vlad().unwrap_or_default(),
-                        head_cid: api
-                            .plog()
-                            .map(|l| crate::encoding::encode_cid(&l.head))
-                            .unwrap_or_default(),
-                        pubkey: self.runtime.block_on(api.public_key()).ok(),
-                    },
+                    true => {
+                        let log = match api.plog() {
+                            Ok(l) => l,
+                            Err(e) => return Self::err_json(e.to_string()),
+                        };
+                        let pubkey = match api.get_value("/pubkey") {
+                            Ok(crate::PlogPathValue::Bin(s) | crate::PlogPathValue::Str(s)) => {
+                                Some(s)
+                            }
+                            Err(_) => None,
+                        };
+                        AccountSummary {
+                            vlad: api.vlad().unwrap_or_default(),
+                            head_cid: crate::encoding::encode_cid(&log.head),
+                            pubkey,
+                        }
+                    }
                     false => {
                         return Self::err_json("import succeeded but no account present");
                     }
@@ -316,7 +325,7 @@ impl LogosAccountsModule for AccountsModuleImpl {
         }
     }
 
-    fn get_public_key(&mut self, vlad: String) -> String {
+    fn get_value(&mut self, vlad: String, path: String) -> String {
         let entry = match self.entry(&vlad) {
             Ok(e) => e,
             Err(e) => return Self::err_json(e),
@@ -326,64 +335,26 @@ impl LogosAccountsModule for AccountsModuleImpl {
             Err(e) => return Self::err_json(format!("cache entry lock poisoned: {e}")),
         };
         let result = match &*guard {
-            CachedAccount::Local(api) => self
-                .runtime
-                .block_on(api.public_key())
-                .map_err(|e| e.to_string()),
+            CachedAccount::Local(api) => api.get_value(&path).map_err(|e| e.to_string()),
             #[cfg(feature = "pcsc")]
-            CachedAccount::Keycard(api) => self
-                .runtime
-                .block_on(api.public_key())
-                .map_err(|e| e.to_string()),
+            CachedAccount::Keycard(api) => api.get_value(&path).map_err(|e| e.to_string()),
         };
         match result {
-            Ok(s) => s,
+            Ok(v) => v.to_json_string(),
             Err(e) => Self::err_json(e),
         }
-    }
-
-    fn verify_plog(&mut self, vlad: String) -> bool {
-        let entry = match self.entry(&vlad) {
-            Ok(e) => e,
-            Err(_) => return false,
-        };
-        let guard = match entry.lock() {
-            Ok(g) => g,
-            Err(_) => return false,
-        };
-        match &*guard {
-            CachedAccount::Local(api) => api.verify_plog().unwrap_or(false),
-            #[cfg(feature = "pcsc")]
-            CachedAccount::Keycard(api) => api.verify_plog().unwrap_or(false),
-        }
-    }
-
-    fn verify_signature(
-        &mut self,
-        pubkey_b64: String,
-        message_b64: String,
-        sig_b64: String,
-    ) -> bool {
-        let msg = crate::encoding::decode_bytes_multibase(&message_b64)
-            .unwrap_or_else(|_| message_b64.into_bytes());
-        // Pure software verify — no cache entry required.
-        let api = SoftwareAccountsApi::new();
-        api.verify_signature(&pubkey_b64, &msg, &sig_b64).is_ok()
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::encoding::{encode_bytes_multibase, encode_multikey, encode_multisig};
-    use multicodec::Codec;
-    use multikey::{Builder, Views};
-    use rand_core::OsRng;
+    use crate::PlogPathValue;
 
     const LOCAL_STORAGE: &str = r#"{"method":"local"}"#;
 
     #[test]
-    fn module_create_update_verify_export() {
+    fn module_create_update_get_value_export() {
         let mut m = AccountsModuleImpl::default();
         let created = m.create_account(LOCAL_STORAGE.into());
         assert!(!created.contains("\"error\""), "{created}");
@@ -392,7 +363,13 @@ mod tests {
         assert!(!result.vlad.is_empty());
         assert!(result.keycard.is_none());
 
-        assert!(m.verify_plog(result.vlad.clone()));
+        let pk = m.get_value(result.vlad.clone(), "/pubkey".into());
+        assert!(!pk.contains("\"error\""), "{pk}");
+        let pk_val: PlogPathValue = serde_json::from_str(&pk).unwrap();
+        assert!(matches!(pk_val, PlogPathValue::Bin(_)));
+        if let (Some(summary_pk), PlogPathValue::Bin(from_path)) = (&result.pubkey, pk_val) {
+            assert_eq!(summary_pk, &from_path);
+        }
 
         let updated = m.update_account(
             result.vlad.clone(),
@@ -402,15 +379,26 @@ mod tests {
         let u: AccountSummary = serde_json::from_str(&updated).unwrap();
         assert_ne!(u.head_cid, result.head_cid);
 
+        let name = m.get_value(result.vlad.clone(), "/n".into());
+        assert_eq!(
+            serde_json::from_str::<PlogPathValue>(&name).unwrap(),
+            PlogPathValue::Str("bob".into())
+        );
+
         let exported = m.export_plog(result.vlad.clone());
         assert!(!exported.is_empty());
         assert!(!exported.contains("\"error\""), "{exported}");
 
         let mut m2 = AccountsModuleImpl::default();
         let imported = m2.import_plog(exported, LOCAL_STORAGE.into());
+        assert!(!imported.contains("\"error\""), "{imported}");
         let l: AccountSummary = serde_json::from_str(&imported).unwrap();
         assert_eq!(l.vlad, result.vlad);
-        assert!(m2.verify_plog(result.vlad.clone()));
+        let name2 = m2.get_value(result.vlad.clone(), "/n".into());
+        assert_eq!(
+            serde_json::from_str::<PlogPathValue>(&name2).unwrap(),
+            PlogPathValue::Str("bob".into())
+        );
     }
 
     #[test]
@@ -443,8 +431,9 @@ mod tests {
         let miss = m.export_plog(a.vlad.clone());
         assert!(miss.contains("\"error\""), "{miss}");
 
-        // B still present
-        assert!(m.verify_plog(b.vlad.clone()));
+        // B still present — can read /pubkey
+        let b_pk = m.get_value(b.vlad.clone(), "/pubkey".into());
+        assert!(!b_pk.contains("\"error\""), "{b_pk}");
 
         let cleared = m.clear_cache();
         let c: serde_json::Value = serde_json::from_str(&cleared).unwrap();
@@ -466,31 +455,17 @@ mod tests {
         assert!(err.contains("\"error\""), "{err}");
         assert!(err.contains("no cached") || err.contains("error"), "{err}");
         // A still works
-        assert!(m.verify_plog(a.vlad));
+        let a_pk = m.get_value(a.vlad, "/pubkey".into());
+        assert!(!a_pk.contains("\"error\""), "{a_pk}");
     }
 
     #[test]
-    fn module_verify_signature() {
+    fn module_get_value_missing_path() {
         let mut m = AccountsModuleImpl::default();
-        // No session required for pure verify.
-        let sk = Builder::new_from_random_bytes(Codec::Secp256K1Priv, &mut OsRng)
-            .unwrap()
-            .try_build()
-            .unwrap();
-        let pk = sk.conv_view().unwrap().to_public_key().unwrap();
-        let msg = b"module verify";
-        let sig = sk.sign_view().unwrap().sign(msg, false, None).unwrap();
-
-        assert!(m.verify_signature(
-            encode_multikey(&pk),
-            encode_bytes_multibase(msg),
-            encode_multisig(&sig),
-        ));
-        assert!(!m.verify_signature(
-            encode_multikey(&pk),
-            encode_bytes_multibase(b"nope"),
-            encode_multisig(&sig),
-        ));
+        let a: CreateAccountResult =
+            serde_json::from_str(&m.create_account(LOCAL_STORAGE.into())).unwrap();
+        let err = m.get_value(a.vlad, "/does/not/exist".into());
+        assert!(err.contains("\"error\""), "{err}");
     }
 
     #[test]

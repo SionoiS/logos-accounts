@@ -1,5 +1,5 @@
 module logos_accounts_module {
-  version "2.0.0"
+  version "3.0.0"
   description "BetterSign accounts with pluggable key storage and local p-log cache"
 
   method create_account(storage_json: string) -> string
@@ -10,9 +10,7 @@ module logos_accounts_module {
   method clear_cache() -> string
 
   method update_account(vlad: string, ops_json: string) -> string
-  method get_public_key(vlad: string) -> string
-  method verify_plog(vlad: string) -> bool
-  method verify_signature(pubkey_b64: string, message_b64: string, sig_b64: string) -> bool
+  method get_value(vlad: string, path: string) -> string
 
   event account_created(vlad: string)
   event account_updated(head_cid: string)

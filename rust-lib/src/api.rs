@@ -2,30 +2,28 @@
 //!
 //! Key storage is selected when creating or loading an account (local software
 //! wallet or Keycard). The Logos module layers a multi-account [`crate::AccountCache`]
-//! on top; this type remains one wallet + one p-log. There is no separate
-//! connect / card_status lifecycle.
+//! on top; this type remains one wallet + one p-log. Create/load verify the p-log
+//! chain before the account is considered loaded; path reads use [`AccountsApi::get_value`].
 
-use crate::config::{
-    default_open_config, default_update_config, pubkey_key_path, update_config_with_ops,
-};
+use crate::config::{default_open_config, default_update_config, update_config_with_ops};
 use crate::encoding::{
-    decode_bytes_multibase, decode_hex32, decode_multikey, decode_multisig, decode_plog,
-    encode_cid, encode_multikey, encode_plog, encode_vlad, plog_from_bytes, plog_to_bytes,
+    decode_bytes_multibase, decode_hex32, decode_plog, encode_bytes_multibase, encode_cid,
+    encode_multikey, encode_plog, encode_vlad, plog_from_bytes, plog_to_bytes,
 };
 use crate::keycard_lifecycle::{
     initialize_virgin_keycard, open_and_verify_binding, store_vlad_binding, KeycardCreateSecrets,
 };
 use crate::path_map::DEFAULT_PUBKEY_PATH;
 use crate::storage::CreateAccountResult;
-use crate::verifier::verify_multikey;
 use crate::wallet::{default_pubkey_key, KeycardWallet};
 use crate::Error;
-use bs::config::asynchronous::{AsyncGetKeyTrait, KeyManager, MultiSigner};
+use bs::config::asynchronous::{KeyManager, MultiSigner};
 use bs::ops::update::OpParams;
 use bs::BetterSign;
 use multicodec::Codec;
+use multikey::Multikey;
 use nexum_apdu_core::prelude::CardTransport;
-use provenance_log::{Key, Log};
+use provenance_log::{Key, Log, Value};
 use serde::{Deserialize, Serialize};
 use std::num::NonZeroUsize;
 use std::path::PathBuf;
@@ -37,8 +35,96 @@ pub struct AccountSummary {
     pub vlad: String,
     /// Multibase head entry CID.
     pub head_cid: String,
-    /// Multibase Multikey public key for `/pubkey` (when available).
+    /// Multibase Multikey public key for `/pubkey` when present in the p-log KVP.
     pub pubkey: Option<String>,
+}
+
+/// Value at a logical p-log key path after full-chain verification.
+///
+/// Serializes as `{"type":"str","value":"..."}` or `{"type":"bin","value":"<multibase>"}`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", content = "value", rename_all = "snake_case")]
+pub enum PlogPathValue {
+    /// UTF-8 string stored via `use_str` (or equivalent).
+    Str(String),
+    /// Binary blob (multibase). Multikey-shaped data uses Multikey multibase encoding.
+    Bin(String),
+}
+
+impl PlogPathValue {
+    /// Serialize to the JSON string used on the LIDL boundary.
+    pub fn to_json_string(&self) -> String {
+        serde_json::to_string(self).unwrap_or_else(|e| {
+            serde_json::json!({ "error": e.to_string() }).to_string()
+        })
+    }
+}
+
+/// Full-chain verify; error if any entry fails or the log has no entries.
+pub fn ensure_plog_verified(log: &Log) -> Result<(), Error> {
+    let mut any = false;
+    for item in log.verify() {
+        any = true;
+        if let Err(e) = item {
+            return Err(Error::PlogVerifyFailed(e.to_string()));
+        }
+    }
+    if !any {
+        return Err(Error::PlogVerifyFailed("empty provenance log".into()));
+    }
+    Ok(())
+}
+
+/// Read a path from the verified head KVP of `log`.
+///
+/// Re-verifies the full chain (cheap for small logs; enforces integrity on read).
+pub fn get_plog_value(log: &Log, path: &str) -> Result<PlogPathValue, Error> {
+    let key = parse_key(path)?;
+    let mut last: Option<provenance_log::Kvp<'_>> = None;
+    let mut any = false;
+    for item in log.verify() {
+        any = true;
+        match item {
+            Ok((_count, _entry, kvp)) => last = Some(kvp),
+            Err(e) => return Err(Error::PlogVerifyFailed(e.to_string())),
+        }
+    }
+    if !any {
+        return Err(Error::PlogVerifyFailed("empty provenance log".into()));
+    }
+    let kvp = last.expect("any implies last");
+    for (k, v) in kvp.iter() {
+        if k == &key {
+            return Ok(match v {
+                Value::Str(s) => PlogPathValue::Str(s.clone()),
+                Value::Data(b) => PlogPathValue::Bin(encode_bin_value(b)),
+                Value::Nil => PlogPathValue::Bin(encode_bytes_multibase(&[])),
+            });
+        }
+    }
+    Err(Error::PathNotFound(path.to_string()))
+}
+
+fn encode_bin_value(data: &[u8]) -> String {
+    match Multikey::try_from(data) {
+        Ok(mk) => encode_multikey(&mk),
+        Err(_) => encode_bytes_multibase(data),
+    }
+}
+
+fn summary_from_verified_plog(log: &Log) -> Result<AccountSummary, Error> {
+    ensure_plog_verified(log)?;
+    let pubkey = match get_plog_value(log, "/pubkey") {
+        Ok(PlogPathValue::Bin(s)) => Some(s),
+        Ok(PlogPathValue::Str(s)) => Some(s),
+        Err(Error::PathNotFound(_)) => None,
+        Err(e) => return Err(e),
+    };
+    Ok(AccountSummary {
+        vlad: encode_vlad(&log.vlad),
+        head_cid: encode_cid(&log.head),
+        pubkey,
+    })
 }
 
 /// Serializable account ops for `update_account` (maps to BetterSign `OpParams`).
@@ -219,33 +305,36 @@ where
     /// Create a new account: open a provenance log with default secp256k1 config.
     ///
     /// The wallet is cloned into BetterSign (Arc-backed for both Keycard and software
-    /// backends), so the API remains connected on success or failure.
+    /// backends), so the API remains connected on success or failure. The opened log is
+    /// verified before this method returns.
     pub async fn create_account(&mut self) -> Result<AccountSummary, Error> {
         let wallet = self.require_wallet_ref()?.clone();
         let open_cfg = default_open_config();
         let bs = BetterSign::new(&open_cfg, wallet.clone(), wallet.clone()).await?;
-        let pubkey = fetch_pubkey_string(&wallet).await.ok();
-        let summary = summary_from_plog(bs.plog(), pubkey);
+        let summary = summary_from_verified_plog(bs.plog())?;
         self.account = Some(bs);
         Ok(summary)
     }
 
     /// Load an existing account from multibase plog encoding.
+    ///
+    /// The log must pass full-chain verification or load fails (nothing is stored).
     pub async fn load_account(&mut self, plog_multibase: &str) -> Result<AccountSummary, Error> {
         let log = decode_plog(plog_multibase)?;
         self.load_account_log(log).await
     }
 
     /// Load an existing account from raw plog bytes.
+    ///
+    /// The log must pass full-chain verification or load fails (nothing is stored).
     pub async fn load_account_bytes(&mut self, plog_bytes: &[u8]) -> Result<AccountSummary, Error> {
         let log = plog_from_bytes(plog_bytes)?;
         self.load_account_log(log).await
     }
 
     async fn load_account_log(&mut self, log: Log) -> Result<AccountSummary, Error> {
+        let summary = summary_from_verified_plog(&log)?;
         let wallet = self.require_wallet_ref()?.clone();
-        let pubkey = fetch_pubkey_string(&wallet).await.ok();
-        let summary = summary_from_plog(&log, pubkey);
         self.account = Some(BetterSign::from_parts(log, wallet.clone(), wallet));
         Ok(summary)
     }
@@ -268,11 +357,7 @@ where
         };
         let account = self.require_account_mut()?;
         account.update(cfg).await?;
-        let pubkey = match self.wallet.as_ref() {
-            Some(w) => fetch_pubkey_string(w).await.ok(),
-            None => None,
-        };
-        Ok(summary_from_plog(self.require_account_ref()?.plog(), pubkey))
+        summary_from_verified_plog(self.require_account_ref()?.plog())
     }
 
     /// Multibase VLAD of the loaded account.
@@ -280,50 +365,13 @@ where
         Ok(encode_vlad(&self.require_account_ref()?.plog().vlad))
     }
 
-    /// Multibase Multikey for `/pubkey` (from wallet cache / get_key).
-    pub async fn public_key(&self) -> Result<String, Error> {
-        let wallet = self.require_wallet_ref()?;
-        fetch_pubkey_string(wallet).await
-    }
-
-    /// Software-verify the entire provenance log.
+    /// Read a logical key path from the loaded p-log's verified KVP state.
     ///
-    /// Returns `true` if every entry verifies.
-    pub fn verify_plog(&self) -> Result<bool, Error> {
+    /// Examples: `"/pubkey"`, `"/profile/name"`. Presence in a loaded account implies the
+    /// log was verified at create/load; this re-checks the chain while materializing state.
+    pub fn get_value(&self, path: &str) -> Result<PlogPathValue, Error> {
         let log = self.require_account_ref()?.plog();
-        let mut ok = true;
-        let mut any = false;
-        for item in log.verify() {
-            any = true;
-            if let Err(e) = item {
-                tracing::warn!(error = %e, "plog entry verification failed");
-                ok = false;
-            }
-        }
-        Ok(ok && any)
-    }
-
-    /// Verify a Multisig over `message` with Multikey `pubkey` (all multibase).
-    pub fn verify_signature(
-        &self,
-        pubkey_multibase: &str,
-        message: &[u8],
-        sig_multibase: &str,
-    ) -> Result<(), Error> {
-        let pk = decode_multikey(pubkey_multibase)?;
-        let sig = decode_multisig(sig_multibase)?;
-        verify_multikey(&pk, message, &sig)
-    }
-
-    /// Verify signature where message is multibase-encoded bytes.
-    pub fn verify_signature_multibase(
-        &self,
-        pubkey_multibase: &str,
-        message_multibase: &str,
-        sig_multibase: &str,
-    ) -> Result<(), Error> {
-        let msg = decode_bytes_multibase(message_multibase)?;
-        self.verify_signature(pubkey_multibase, &msg, sig_multibase)
+        get_plog_value(log, path)
     }
 
     /// Export the loaded plog as multibase.
@@ -441,25 +489,6 @@ where
     }
 }
 
-async fn fetch_pubkey_string<W>(wallet: &W) -> Result<String, Error>
-where
-    W: KeyManager<Error>,
-{
-    let thr = NonZeroUsize::new(1).unwrap();
-    let key = pubkey_key_path();
-    let mk =
-        AsyncGetKeyTrait::get_key(wallet, &key, &Codec::Secp256K1Priv, thr, thr).await?;
-    Ok(encode_multikey(&mk))
-}
-
-fn summary_from_plog(log: &Log, pubkey: Option<String>) -> AccountSummary {
-    AccountSummary {
-        vlad: encode_vlad(&log.vlad),
-        head_cid: encode_cid(&log.head),
-        pubkey,
-    }
-}
-
 /// Convenience: software wallet type used in integration tests.
 pub type SoftwareWallet = bs_wallets::memory::InMemoryKeyManager<Error>;
 
@@ -478,13 +507,11 @@ impl SoftwareAccountsApi {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::encoding::{encode_bytes_multibase, encode_multisig};
-    use multicodec::Codec;
-    use multikey::Builder;
-    use rand_core::OsRng;
+    use crate::encoding::decode_multikey;
+    use multikey::Views;
 
     #[tokio::test]
-    async fn create_update_verify_export_import() {
+    async fn create_update_export_import_get_value() {
         let mut api = SoftwareAccountsApi::software();
         assert!(api.is_connected());
         assert!(!api.has_account());
@@ -493,7 +520,16 @@ mod tests {
         assert!(!created.vlad.is_empty());
         assert!(!created.head_cid.is_empty());
         assert!(created.pubkey.is_some());
-        assert!(api.verify_plog().expect("verify after create"));
+
+        let pk = api.get_value("/pubkey").expect("get /pubkey");
+        assert!(matches!(pk, PlogPathValue::Bin(_)));
+        assert_eq!(
+            match &pk {
+                PlogPathValue::Bin(s) => s.as_str(),
+                _ => unreachable!(),
+            },
+            created.pubkey.as_deref().unwrap()
+        );
 
         let updated = api
             .update_account(
@@ -502,23 +538,27 @@ mod tests {
             .await
             .expect("update");
         assert_ne!(updated.head_cid, created.head_cid);
-        assert!(api.verify_plog().expect("verify after update"));
+
+        assert_eq!(
+            api.get_value("/profile/name").unwrap(),
+            PlogPathValue::Str("alice".into())
+        );
 
         let exported = api.export_plog().expect("export");
         let exported_bytes = api.export_plog_bytes().expect("export bytes");
 
-        // Import into a fresh software API with a new wallet cannot re-sign with
-        // old secrets — but load + verify_plog of the static log must succeed.
-        // Re-attach the same wallet by loading into a new handle with from_parts path:
+        // Import into a fresh software API: load requires full-chain verify.
         let mut api2 = SoftwareAccountsApi::software();
-        // Load only verifies structure with whatever wallet is attached for future updates.
         let loaded = api2
             .load_account(&exported)
             .await
             .expect("load multibase");
         assert_eq!(loaded.vlad, created.vlad);
         assert_eq!(loaded.head_cid, updated.head_cid);
-        assert!(api2.verify_plog().expect("verify loaded"));
+        assert_eq!(
+            api2.get_value("/profile/name").unwrap(),
+            PlogPathValue::Str("alice".into())
+        );
 
         let loaded_b = {
             let mut api3 = SoftwareAccountsApi::software();
@@ -530,31 +570,34 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn verify_signature_helper() {
-        use multikey::Views;
+    async fn load_rejects_unverified_plog() {
+        let mut api = SoftwareAccountsApi::software();
+        let created = api.create_account().await.unwrap();
+        let exported = api.export_plog().unwrap();
+        // Corrupt multibase payload so decode may succeed or fail; if decode
+        // succeeds with garbage bytes, verification must fail.
+        let mut corrupt_bytes = exported.clone().into_bytes();
+        // Flip a character in the middle of the payload (keep multibase prefix).
+        let mid = corrupt_bytes.len() / 2;
+        if let Some(b) = corrupt_bytes.get_mut(mid) {
+            *b = if *b == b'A' { b'B' } else { b'A' };
+        }
+        let corrupt = String::from_utf8_lossy(&corrupt_bytes).into_owned();
+        let mut api2 = SoftwareAccountsApi::software();
+        let err = api2.load_account(&corrupt).await;
+        assert!(err.is_err(), "corrupt plog should not load; got {err:?}");
+        assert!(!api2.has_account());
+        // Valid log still loads.
+        let loaded = api2.load_account(&exported).await.unwrap();
+        assert_eq!(loaded.vlad, created.vlad);
+    }
 
-        let api = SoftwareAccountsApi::software();
-        let sk = Builder::new_from_random_bytes(Codec::Secp256K1Priv, &mut OsRng)
-            .unwrap()
-            .try_build()
-            .unwrap();
-        let pk = sk.conv_view().unwrap().to_public_key().unwrap();
-        let msg = b"domain api verify";
-        let sig = sk.sign_view().unwrap().sign(msg, false, None).unwrap();
-
-        api.verify_signature(&encode_multikey(&pk), msg, &encode_multisig(&sig))
-            .expect("verify ok");
-        assert!(api
-            .verify_signature(&encode_multikey(&pk), b"nope", &encode_multisig(&sig))
-            .is_err());
-
-        let msg_mb = encode_bytes_multibase(msg);
-        api.verify_signature_multibase(
-            &encode_multikey(&pk),
-            &msg_mb,
-            &encode_multisig(&sig),
-        )
-        .expect("multibase message verify");
+    #[tokio::test]
+    async fn get_value_missing_path() {
+        let mut api = SoftwareAccountsApi::software();
+        api.create_account().await.unwrap();
+        let err = api.get_value("/does/not/exist").unwrap_err();
+        assert!(matches!(err, Error::PathNotFound(_)), "{err:?}");
     }
 
     #[tokio::test]
@@ -577,22 +620,17 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn entry_proofs_verify_against_pubkey() {
-        use multikey::Views;
-
+    async fn entry_proofs_pubkey_from_plog() {
         let mut api = SoftwareAccountsApi::software();
         let created = api.create_account().await.unwrap();
         let pubkey_mb = created.pubkey.expect("pubkey");
         let pk = decode_multikey(&pubkey_mb).unwrap();
         assert!(pk.attr_view().unwrap().is_public_key());
 
-        // After create, plog verifies as a chain (includes entry proofs vs stored keys).
-        assert!(api.verify_plog().unwrap());
-
         api.update_account("[]").await.unwrap();
-        assert!(api.verify_plog().unwrap());
-        // Public key path still resolvable
-        let pk2 = api.public_key().await.unwrap();
-        assert_eq!(pk2, pubkey_mb);
+        match api.get_value("/pubkey").unwrap() {
+            PlogPathValue::Bin(s) => assert_eq!(s, pubkey_mb),
+            other => panic!("expected bin pubkey, got {other:?}"),
+        }
     }
 }

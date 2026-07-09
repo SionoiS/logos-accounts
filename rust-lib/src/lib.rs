@@ -53,7 +53,8 @@ mod verifier;
 mod wallet;
 
 pub use api::{
-    parse_ops_json, AccountOp, AccountSummary, AccountsApi, SoftwareAccountsApi, SoftwareWallet,
+    ensure_plog_verified, get_plog_value, parse_ops_json, AccountOp, AccountSummary, AccountsApi,
+    PlogPathValue, SoftwareAccountsApi, SoftwareWallet,
 };
 pub use binding::{
     parse_card_vlad_hash, verify_card_vlad_binding, vlad_hash, vlad_hash_from_multibase,

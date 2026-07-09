@@ -96,6 +96,14 @@ pub enum Error {
     )]
     AccountNotCached(String),
 
+    /// Provenance log failed full-chain verification
+    #[error("p-log verification failed: {0}")]
+    PlogVerifyFailed(String),
+
+    /// No value at the requested logical key path in the p-log KVP
+    #[error("no value at path {0}")]
+    PathNotFound(String),
+
     /// Encoding / decoding failure (multibase, JSON, …)
     #[error("encoding error: {0}")]
     Encoding(String),

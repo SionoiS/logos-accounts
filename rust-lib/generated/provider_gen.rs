@@ -70,14 +70,7 @@ pub trait LogosAccountsModule: Send + 'static {
     fn remove_plog(&mut self, vlad: String) -> String;
     fn clear_cache(&mut self) -> String;
     fn update_account(&mut self, vlad: String, ops_json: String) -> String;
-    fn get_public_key(&mut self, vlad: String) -> String;
-    fn verify_plog(&mut self, vlad: String) -> bool;
-    fn verify_signature(
-        &mut self,
-        pubkey_b64: String,
-        message_b64: String,
-        sig_b64: String,
-    ) -> bool;
+    fn get_value(&mut self, vlad: String, path: String) -> String;
 }
 
 type DispatchFn = fn(&str, &[serde_json::Value]) -> Option<serde_json::Value>;
@@ -200,48 +193,17 @@ pub fn install<T: LogosAccountsModule + Default>() {
                 );
                 Some(serde_json::Value::from(result))
             }
-            "get_public_key" => {
-                if args.is_empty() {
+            "get_value" => {
+                if args.len() < 2 {
                     return None;
                 }
-                let result = imp.get_public_key(
-                    args.get(0)
-                        .unwrap_or(&serde_json::Value::Null)
-                        .as_str()
-                        .unwrap_or_default()
-                        .to_string(),
-                );
-                Some(serde_json::Value::from(result))
-            }
-            "verify_plog" => {
-                if args.is_empty() {
-                    return None;
-                }
-                let result = imp.verify_plog(
-                    args.get(0)
-                        .unwrap_or(&serde_json::Value::Null)
-                        .as_str()
-                        .unwrap_or_default()
-                        .to_string(),
-                );
-                Some(serde_json::Value::from(result))
-            }
-            "verify_signature" => {
-                if args.len() < 3 {
-                    return None;
-                }
-                let result = imp.verify_signature(
+                let result = imp.get_value(
                     args.get(0)
                         .unwrap_or(&serde_json::Value::Null)
                         .as_str()
                         .unwrap_or_default()
                         .to_string(),
                     args.get(1)
-                        .unwrap_or(&serde_json::Value::Null)
-                        .as_str()
-                        .unwrap_or_default()
-                        .to_string(),
-                    args.get(2)
                         .unwrap_or(&serde_json::Value::Null)
                         .as_str()
                         .unwrap_or_default()
@@ -322,9 +284,7 @@ pub extern "C" fn logos_module_get_methods() -> *mut c_char {
 {"isInvokable":true,"name":"remove_plog","parameters":[{"name":"vlad","type":"QString"}],"returnType":"QString","signature":"remove_plog(QString)"},
 {"isInvokable":true,"name":"clear_cache","parameters":[],"returnType":"QString","signature":"clear_cache()"},
 {"isInvokable":true,"name":"update_account","parameters":[{"name":"vlad","type":"QString"},{"name":"ops_json","type":"QString"}],"returnType":"QString","signature":"update_account(QString,QString)"},
-{"isInvokable":true,"name":"get_public_key","parameters":[{"name":"vlad","type":"QString"}],"returnType":"QString","signature":"get_public_key(QString)"},
-{"isInvokable":true,"name":"verify_plog","parameters":[{"name":"vlad","type":"QString"}],"returnType":"bool","signature":"verify_plog(QString)"},
-{"isInvokable":true,"name":"verify_signature","parameters":[{"name":"pubkey_b64","type":"QString"},{"name":"message_b64","type":"QString"},{"name":"sig_b64","type":"QString"}],"returnType":"bool","signature":"verify_signature(QString,QString,QString)"},
+{"isInvokable":true,"name":"get_value","parameters":[{"name":"vlad","type":"QString"},{"name":"path","type":"QString"}],"returnType":"QString","signature":"get_value(QString,QString)"},
 {"name":"account_created","parameters":[{"name":"vlad","type":"QString"}],"signature":"account_created(QString)","type":"event"},
 {"name":"account_updated","parameters":[{"name":"head_cid","type":"QString"}],"signature":"account_updated(QString)","type":"event"},
 {"name":"card_error","parameters":[{"name":"message","type":"QString"}],"signature":"card_error(QString)","type":"event"}

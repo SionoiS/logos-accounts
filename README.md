@@ -9,7 +9,7 @@ This repository implements provenance-based identity (VLADs + provenance logs / 
 | Layer | What |
 |-------|------|
 | **Wallet** | `KeycardWallet` implements BetterSign `KeyManager` + `MultiSigner` (hybrid crypto: software ephemerals, hardware `/pubkey`) |
-| **Domain API** | `AccountsApi` — single-account create / load / update / verify / export (multibase / JSON) |
+| **Domain API** | `AccountsApi` — single-account create / load / update / path-read / export (multibase / JSON); only verified p-logs |
 | **Local cache** | `AccountCache` — multi p-log registry keyed by SHA-256(VLAD); import / export / remove / clear |
 | **Storage choice** | Caller picks `local` or `keycard` when creating or importing an account (no separate connect step) |
 | **Logos module** | LIDL contract + `AccountsModuleImpl` plugin packaging |
@@ -128,13 +128,14 @@ To create a new account on a previously used card, factory-reset it first (e.g. 
 | Method | Responsibility |
 |--------|----------------|
 | `attach_wallet` / `SoftwareAccountsApi::software()` | Library: attach local or custom wallet |
-| `create_account` | Open a new p-log |
+| `create_account` | Open a new p-log (verified before return) |
 | `create_account_on_virgin_keycard` | Full virgin Keycard create + VLAD hash tag |
-| `load_account` / `load_account_on_keycard` | Load p-log into this API; Keycard path checks VLAD hash |
+| `load_account` / `load_account_on_keycard` | Load p-log; **full-chain verify required**; Keycard also checks VLAD hash |
 | `update_account` / `update_account_ops` | Append ops, sign with `/pubkey` |
-| `export_plog` / `vlad` / `public_key` | Identity and export |
-| `verify_plog` / `verify_signature` | Software verification |
+| `export_plog` / `vlad` / `get_value` | Identity, export, and path reads from verified KVP |
 | `rotate_pubkey` | Library-only Keycard path rebind + plog KeyGen |
+
+Only verified p-logs are held after create/load. `get_value(path)` materializes the head KVP (e.g. `"/pubkey"`, `"/profile/name"`).
 
 Default open config uses secp256k1 for VLAD, first-entry, and `/pubkey`, with lock/unlock scripts matching BetterSign conventions:
 
@@ -155,7 +156,7 @@ Wire methods still pass **full multibase VLAD** strings; hashing is an implement
 
 ## Logos module (LIDL)
 
-Public contract (`rust-lib/logos_accounts_module.lidl`, version **2.0.0**):
+Public contract (`rust-lib/logos_accounts_module.lidl`, version **3.0.0**):
 
 ```text
 module logos_accounts_module {
@@ -167,9 +168,7 @@ module logos_accounts_module {
   method clear_cache() -> string
 
   method update_account(vlad: string, ops_json: string) -> string
-  method get_public_key(vlad: string) -> string
-  method verify_plog(vlad: string) -> bool
-  method verify_signature(pubkey_b64: string, message_b64: string, sig_b64: string) -> bool
+  method get_value(vlad: string, path: string) -> string
 
   event account_created(vlad: string)
   event account_updated(head_cid: string)
@@ -179,10 +178,13 @@ module logos_accounts_module {
 
 | Method | Notes |
 |--------|--------|
-| `create_account` | Creates and **inserts** into the cache; returns `vlad` for later ops |
-| `import_plog` | Replaces former `load_account`; upserts by VLAD hash |
+| `create_account` | Creates, **verifies**, and **inserts** into the cache; returns `vlad` for later ops |
+| `import_plog` | Full-chain verify required; upserts by VLAD hash only on success |
 | `export_plog` / `remove_plog` / `clear_cache` | Cache lifecycle |
-| `update_account` / `get_public_key` / `verify_plog` | First arg is multibase VLAD |
+| `update_account` | First arg is multibase VLAD |
+| `get_value` | Read any logical path from the verified p-log KVP (`{"type":"str"|"bin","value":...}`) |
+
+**Removed in 3.0.0:** `get_public_key` (use `get_value(vlad, "/pubkey")`), `verify_plog` (verify is mandatory on create/import), `verify_signature` (use Multikey libraries directly if needed).
 
 Complex types cross the boundary as **strings** (JSON / multibase). Keycard create may return `keycard` credentials alongside `vlad` / `head_cid` / `pubkey`.
 
