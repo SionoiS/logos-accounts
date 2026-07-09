@@ -1,1 +1,9 @@
 /target
+rust-lib/target/
+# Builder regenerates this; a checked-in copy lives under rust-lib/generated/ for local cargo test.
+# rust-lib/generated/
+result
+result-*
+lib/
+*.swp
+.DS_Store
