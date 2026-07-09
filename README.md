@@ -8,11 +8,11 @@ This repository will implement provenance-based identity (VLADs + provenance log
 
 | Phase | Description | Status |
 |-------|-------------|--------|
-| **1** | BetterSign Keycard integration (wallet traits) | Planned — **active focus** |
+| **1** | BetterSign Keycard integration (wallet traits) | **Done** (unit-tested; hardware tests optional/`#[ignore]`) |
 | **2** | Domain API | **WIP** (not started) |
 | **3** | Logos module exposure | **WIP** (not started) |
 
-The crate is currently a dependency-wired stub (`staticlib` + git deps only). Implementation starts with Phase 1.
+Phase 1 provides `KeycardWallet` implementing BetterSign async (and sync) `KeyManager` + `MultiSigner` with hybrid software-ephemeral / Keycard-long-lived crypto.
 
 ## Dependencies
 

@@ -2,11 +2,54 @@
 name = "logos-accounts"
 version = "1.0.0"
 edition = "2024"
+description = "BetterSign accounts backed by Keycard hardware, exposed as a Logos module"
+license = "MIT OR Apache-2.0"
 
 [lib]
-crate-type = ["staticlib"]
+# staticlib for Logos packaging; rlib so unit tests and dependents can link
+crate-type = ["rlib", "staticlib"]
+
+[features]
+default = []
+# Optional PC/SC transport for real hardware (hardware tests are #[ignore])
+pcsc = ["dep:nexum-apdu-transport-pcsc"]
 
 [dependencies]
+# Core integration targets
 nexum-keycard = { git = "https://github.com/nxm-rs/keycard", branch = "main" }
 bs = { git = "https://github.com/cryptidtech/bs", branch = "main" }
 logos-rust-sdk = { git = "https://github.com/logos-co/logos-rust-sdk", branch = "master" }
+
+# BetterSign trait surface + multibase types (same git workspace as `bs`)
+bs-traits = { git = "https://github.com/cryptidtech/bs", branch = "main" }
+multikey = { git = "https://github.com/cryptidtech/bs", branch = "main" }
+multisig = { git = "https://github.com/cryptidtech/bs", branch = "main" }
+multicodec = { git = "https://github.com/cryptidtech/bs", branch = "main" }
+multicid = { git = "https://github.com/cryptidtech/bs", branch = "main" }
+multihash = { git = "https://github.com/cryptidtech/bs", branch = "main" }
+provenance-log = { git = "https://github.com/cryptidtech/bs", branch = "main" }
+
+# Keycard transport bounds
+nexum-apdu-core = { git = "https://github.com/nxm-rs/nexum-apdu", rev = "008bc499a9e5b090e465a2ad421bfb1b73b76605" }
+nexum-apdu-transport-pcsc = { git = "https://github.com/nxm-rs/nexum-apdu", rev = "008bc499a9e5b090e465a2ad421bfb1b73b76605", optional = true }
+
+# Crypto / path helpers
+bip32 = { version = "0.5", default-features = false, features = ["std", "secp256k1"] }
+k256 = { version = "0.13", features = ["ecdsa"] }
+sha2 = "0.10"
+rand_core = { version = "0.6", package = "rand_core", features = ["getrandom"] }
+alloy-primitives = { version = "1", default-features = false, features = ["k256"] }
+bytes = "1"
+
+# Async + utility
+tokio = { version = "1", features = ["sync", "rt", "macros"] }
+thiserror = "2"
+tracing = "0.1"
+futures = "0.3"
+
+# Pin blake3: 1.8+ requires digest 0.11, but multihash (bs) still needs digest 0.10 + traits-preview
+blake3 = { version = "=1.5.5", features = ["traits-preview", "zeroize"] }
+
+[dev-dependencies]
+tokio = { version = "1", features = ["sync", "rt", "rt-multi-thread", "macros"] }
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
