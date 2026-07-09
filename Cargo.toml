@@ -1,0 +1,12 @@
+[package]
+name = "logos-accounts"
+version = "1.0.0"
+edition = "2024"
+
+[lib]
+crate-type = ["staticlib"]
+
+[dependencies]
+nexum-keycard = { git = "https://github.com/nxm-rs/keycard", branch = "main" }
+bs = { git = "https://github.com/cryptidtech/bs", branch = "main" }
+logos-rust-sdk = { git = "https://github.com/logos-co/logos-rust-sdk", branch = "master" }
