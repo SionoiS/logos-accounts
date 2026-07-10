@@ -1,4 +1,4 @@
-//! Default BetterSign open/update configs for secp256k1 Keycard accounts.
+//! Default BetterSign open/update configs and path-delegation helpers.
 
 use bs::ops::params::anykey::PubkeyParams;
 use bs::ops::params::vlad::{FirstEntryKeyParams, VladParams};
@@ -7,7 +7,7 @@ use multicodec::Codec;
 use provenance_log::key::key_paths::ValidatedKeyParams;
 use provenance_log::{Key, Script};
 
-/// Lock script used for entry verification after open.
+/// Lock script used for entry verification after open (subsequent entries).
 pub const DEFAULT_ENTRY_LOCK: &str = r#"check_signature("/pubkey", "/entry/")"#;
 
 /// Unlock script pushed when creating a new entry.
@@ -21,14 +21,13 @@ pub const DEFAULT_ENTRY_UNLOCK: &str = r#"push("/entry/"); push("/entry/proof")"
 /// to `/pubkey` instead of `{branch}pubkey`. The lock's *path association*
 /// still scopes which ops the lock applies to via `Entry::sort_locks`.
 pub fn delegated_lock_code(branch: &Key) -> String {
-    // branch is e.g. `/apps/chat/` → check `/apps/chat/pubkey`
     format!(
         r#"check_signature("{}pubkey", "/entry/")"#,
         branch.as_str()
     )
 }
 
-/// Build the default **secp256k1** open config (mirrors `bs` tests, Keycard-compatible).
+/// Build the default **secp256k1** open config (ephemeral VLAD/entrykey + external `/pubkey`).
 pub fn default_open_config() -> open::Config {
     open::Config::builder()
         .vlad(VladParams::builder().key(Codec::Secp256K1Priv).build())
@@ -61,6 +60,8 @@ pub fn default_unlock_script() -> Script {
 }
 
 /// Build the default update config: sign with `/pubkey`, default unlock script.
+///
+/// Prefer prepare/commit with external Multisig; this remains for reference / tests.
 pub fn default_update_config() -> update::Config {
     update::Config::builder()
         .unlock(default_unlock_script())
@@ -107,7 +108,6 @@ pub fn delegate_pubkey_key(branch: &Key) -> Result<Key, crate::Error> {
             "delegation path must be a branch (trailing '/'), got {branch}"
         )));
     }
-    // Branch ends with `/`, so concatenation yields e.g. `/apps/chat/pubkey`.
     let s = format!("{}pubkey", branch.as_str());
     Key::try_from(s.as_str())
         .map_err(|e| crate::Error::InvalidOp(e.to_string()))

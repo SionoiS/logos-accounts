@@ -1,16 +1,17 @@
-//! logos-accounts — BetterSign accounts with pluggable key storage (local or Keycard).
+//! logos-accounts — BetterSign p-log cache with external Multisig commits.
 //!
-//! # Phase 1 — wallet traits
+//! # Create
 //!
-//! [`KeycardWallet`] satisfies BetterSign's opinionated
-//! [`bs::config::asynchronous::KeyManager`] and [`bs::config::asynchronous::MultiSigner`].
+//! [`PlogAccount::create`] opens a provenance log with software ephemerals
+//! (VLAD + `/entrykey`) and a peer-provided root Multikey at `/pubkey`.
+//! Long-lived private keys never enter this process.
 //!
-//! # Phase 2 — domain API
+//! # Mutations
 //!
-//! [`AccountsApi`] is an IPC-friendly single-account service (multibase strings / JSON ops).
-//! Key storage is chosen at create/import via [`StorageConfig`].
+//! All post-open writes use prepare → external Multisig → commit
+//! ([`PlogAccount::prepare_update`] / [`PlogAccount::commit_update`]).
 //!
-//! # Phase 3 — Logos module + local p-log cache
+//! # Logos module
 //!
 //! This crate is the `rust-lib` half of a Logos module package. The builder
 //! (or checked-in scaffold) generates `generated/provider_gen.rs` from
@@ -33,35 +34,28 @@ mod provider_scaffold {
 }
 
 pub use provider_scaffold::{
-    context, emit_account_created, emit_account_updated, emit_card_error, emit_path_delegated,
+    context, emit_account_created, emit_account_updated, emit_error, emit_path_delegated,
     emit_path_revoked, install, LogosAccountsModule, RustModuleContext,
 };
 
 mod api;
-mod binding;
 mod cache;
 mod config;
 mod convert;
 mod encoding;
 mod entry_update;
+mod ephemeral_open;
 mod error;
-mod keycard_lifecycle;
-mod keycard_session;
 mod module;
-mod path_map;
-mod storage;
 mod verifier;
-mod wallet;
+mod vlad_hash;
 
 pub use api::{
-    ensure_plog_verified, get_plog_value, parse_ops_json, AccountOp, AccountSummary, AccountsApi,
-    PathDelegation, PathUpdateChallenge, PlogPathValue, SoftwareAccountsApi, SoftwareWallet,
+    ensure_plog_verified, get_plog_value, parse_ops_json, parse_update_request_json, AccountOp,
+    AccountSummary, PathDelegation, PlogAccount, PlogPathValue, UpdateChallenge, UpdateKind,
+    UpdateRequest,
 };
-pub use binding::{
-    parse_card_vlad_hash, verify_card_vlad_binding, vlad_hash, vlad_hash_from_multibase,
-    VLAD_HASH_LEN,
-};
-pub use cache::{AccountCache, CachedAccount, VladHash};
+pub use cache::{AccountCache, VladHash};
 pub use config::{
     default_open_config, default_update_config, delegate_pubkey_key, delegated_branch_lock_script,
     delegated_lock_code, key_under_branch, parse_branch_path, pubkey_key_path,
@@ -69,8 +63,7 @@ pub use config::{
     DEFAULT_ENTRY_UNLOCK,
 };
 pub use convert::{
-    alloy_signature_to_multisig, multikey_to_sec1, public_key_to_multikey, require_secp256k1_priv,
-    sec1_to_multikey, sha256_prehash, signature_bytes_to_multisig, PREHASH_LEN,
+    multikey_to_sec1, sec1_to_multikey, sha256_prehash, signature_bytes_to_multisig, PREHASH_LEN,
 };
 pub use encoding::{
     decode_bytes_multibase, decode_hex, decode_hex32, decode_multikey, decode_multisig, decode_plog,
@@ -78,21 +71,10 @@ pub use encoding::{
     encode_plog, encode_vlad, plog_from_bytes, plog_to_bytes,
 };
 pub use error::Error;
-pub use keycard_lifecycle::{
-    initialize_virgin_keycard, open_and_verify_binding, store_vlad_binding, verify_vlad_binding,
-    InitializedKeycard, KeycardCreateSecrets,
-};
-pub use keycard_session::{KeycardSession, SharedKeycard};
+pub use ephemeral_open::{open_plog_with_external_pubkey, EphemeralOpenHelper};
 pub use module::AccountsModuleImpl;
-pub use path_map::{parse_derivation_path, PathMap, DEFAULT_PUBKEY_PATH};
-pub use storage::{
-    parse_storage_json, CreateAccountResult, KeycardCredentials, StorageConfig,
-};
 pub use verifier::{verify_multikey, MultikeyVerifier};
-pub use wallet::{
-    assert_async_wallet, assert_sync_wallet, default_pubkey_derivation, default_pubkey_key,
-    KeycardWallet,
-};
+pub use vlad_hash::{vlad_hash, vlad_hash_from_multibase, VLAD_HASH_LEN};
 
 /// Crate result alias.
 pub type Result<T> = std::result::Result<T, Error>;

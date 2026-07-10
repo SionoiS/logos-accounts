@@ -1,31 +1,24 @@
 module logos_accounts_module {
-  version "4.0.0"
-  description "BetterSign accounts with pluggable key storage, local p-log cache, and path delegation"
+  version "5.0.0"
+  description "BetterSign p-log cache: one-shot ephemeral open, external Multisig for mutations"
 
-  method create_account(storage_json: string) -> string
+  method create_account(pubkey_multibase: string) -> string
 
-  method import_plog(plog_b64: string, storage_json: string) -> string
+  method import_plog(plog_b64: string) -> string
   method export_plog(vlad: string) -> string
   method remove_plog(vlad: string) -> string
   method clear_cache() -> string
 
-  method update_account(vlad: string, ops_json: string) -> string
   method get_value(vlad: string, path: string) -> string
-
-  // Path delegation (root-signed policy)
-  method delegate_path(vlad: string, path: string, pubkey_multibase: string) -> string
-  method revoke_path(vlad: string, path: string) -> string
   method list_delegations(vlad: string) -> string
 
-  // Writes under a delegated path
-  method update_path(vlad: string, path: string, ops_json: string) -> string
-  method prepare_path_update(vlad: string, path: string, ops_json: string) -> string
-  method commit_path_update(vlad: string, challenge_id: string, signature_multibase: string) -> string
-  method cancel_path_update(vlad: string, challenge_id: string) -> string
+  method prepare_update(vlad: string, request_json: string) -> string
+  method commit_update(vlad: string, challenge_id: string, signature_multibase: string) -> string
+  method cancel_update(vlad: string, challenge_id: string) -> string
 
   event account_created(vlad: string)
   event account_updated(head_cid: string)
   event path_delegated(vlad: string, path: string)
   event path_revoked(vlad: string, path: string)
-  event card_error(message: string)
+  event error(message: string)
 }

@@ -1,7 +1,7 @@
 {
   "name": "logos_accounts_module",
   "version": "1.0.0",
-  "description": "BetterSign accounts backed by Keycard hardware",
+  "description": "BetterSign p-log cache with ephemeral open and external Multisig commits",
   "author": "Logos Accounts",
   "type": "core",
   "interface": "cdylib",

@@ -1,7 +1,7 @@
-//! Low-level p-log entry construction for path delegation and external signatures.
+//! Low-level p-log entry construction for external Multisig commits.
 //!
 //! Mirrors BetterSign `update_plog` assembly so prepare/commit can attach a proof
-//! without going through the wallet signer, and so revoke can replace (not only append)
+//! without an in-process wallet, and so revoke can replace (not only append)
 //! entry lock scripts.
 
 use crate::config::default_unlock_script;
@@ -19,7 +19,7 @@ use provenance_log::{Key, Lipmaa as _, Log, OpId, Script};
 pub struct UnsignedUpdate {
     /// Entry with empty proof.
     pub entry: Entry,
-    /// Canonical serialized form that Multikey/Keycard sign over.
+    /// Canonical serialized form that Multikey signers sign over.
     pub message: Vec<u8>,
 }
 

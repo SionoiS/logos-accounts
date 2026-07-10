@@ -1,4 +1,4 @@
-//! Software Multikey verifier (no card I/O).
+//! Software Multikey verifier.
 
 use crate::Error;
 use bs_traits::asyncro::AsyncVerifier;

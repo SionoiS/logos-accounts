@@ -1,5 +1,5 @@
 {
-  description = "BetterSign accounts backed by Keycard hardware (Logos module)";
+  description = "BetterSign p-log cache with external Multisig commits (Logos module)";
   inputs = {
     logos-module-builder.url = "github:logos-co/logos-module-builder/03ad946f1928cff35373a21838f89d6fd7c8eadc";
     # Provides logos-lidl-gen and the SDK the crate links.

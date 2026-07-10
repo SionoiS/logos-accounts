@@ -52,11 +52,11 @@ pub fn emit_account_updated(head_cid: &str) {
     emit_event("account_updated", &serde_json::Value::Array(payload));
 }
 
-/// Typed emitter for the `card_error` event.
-pub fn emit_card_error(message: &str) {
+/// Typed emitter for the `error` event.
+pub fn emit_error(message: &str) {
     let mut payload: Vec<serde_json::Value> = Vec::new();
     payload.push(serde_json::Value::from(message));
-    emit_event("card_error", &serde_json::Value::Array(payload));
+    emit_event("error", &serde_json::Value::Array(payload));
 }
 
 /// Typed emitter for the `path_delegated` event.
@@ -80,26 +80,21 @@ pub trait LogosAccountsModule: Send + 'static {
     /// One-time setup after host stamps module context.
     fn on_context_ready(&mut self, _ctx: &RustModuleContext) {}
 
-    fn create_account(&mut self, storage_json: String) -> String;
-    fn import_plog(&mut self, plog_b64: String, storage_json: String) -> String;
+    fn create_account(&mut self, pubkey_multibase: String) -> String;
+    fn import_plog(&mut self, plog_b64: String) -> String;
     fn export_plog(&mut self, vlad: String) -> String;
     fn remove_plog(&mut self, vlad: String) -> String;
     fn clear_cache(&mut self) -> String;
-    fn update_account(&mut self, vlad: String, ops_json: String) -> String;
     fn get_value(&mut self, vlad: String, path: String) -> String;
-
-    fn delegate_path(&mut self, vlad: String, path: String, pubkey_multibase: String) -> String;
-    fn revoke_path(&mut self, vlad: String, path: String) -> String;
     fn list_delegations(&mut self, vlad: String) -> String;
-    fn update_path(&mut self, vlad: String, path: String, ops_json: String) -> String;
-    fn prepare_path_update(&mut self, vlad: String, path: String, ops_json: String) -> String;
-    fn commit_path_update(
+    fn prepare_update(&mut self, vlad: String, request_json: String) -> String;
+    fn commit_update(
         &mut self,
         vlad: String,
         challenge_id: String,
         signature_multibase: String,
     ) -> String;
-    fn cancel_path_update(&mut self, vlad: String, challenge_id: String) -> String;
+    fn cancel_update(&mut self, vlad: String, challenge_id: String) -> String;
 }
 
 fn arg_str(args: &[serde_json::Value], i: usize) -> String {
@@ -155,79 +150,32 @@ pub fn install<T: LogosAccountsModule + Default>() {
                 if args.is_empty() {
                     return None;
                 }
-                let result = imp.create_account(
-                    args.get(0)
-                        .unwrap_or(&serde_json::Value::Null)
-                        .as_str()
-                        .unwrap_or_default()
-                        .to_string(),
-                );
+                let result = imp.create_account(arg_str(args, 0));
                 Some(serde_json::Value::from(result))
             }
             "import_plog" => {
-                if args.len() < 2 {
+                if args.is_empty() {
                     return None;
                 }
-                let result = imp.import_plog(
-                    args.get(0)
-                        .unwrap_or(&serde_json::Value::Null)
-                        .as_str()
-                        .unwrap_or_default()
-                        .to_string(),
-                    args.get(1)
-                        .unwrap_or(&serde_json::Value::Null)
-                        .as_str()
-                        .unwrap_or_default()
-                        .to_string(),
-                );
+                let result = imp.import_plog(arg_str(args, 0));
                 Some(serde_json::Value::from(result))
             }
             "export_plog" => {
                 if args.is_empty() {
                     return None;
                 }
-                let result = imp.export_plog(
-                    args.get(0)
-                        .unwrap_or(&serde_json::Value::Null)
-                        .as_str()
-                        .unwrap_or_default()
-                        .to_string(),
-                );
+                let result = imp.export_plog(arg_str(args, 0));
                 Some(serde_json::Value::from(result))
             }
             "remove_plog" => {
                 if args.is_empty() {
                     return None;
                 }
-                let result = imp.remove_plog(
-                    args.get(0)
-                        .unwrap_or(&serde_json::Value::Null)
-                        .as_str()
-                        .unwrap_or_default()
-                        .to_string(),
-                );
+                let result = imp.remove_plog(arg_str(args, 0));
                 Some(serde_json::Value::from(result))
             }
             "clear_cache" => {
                 let result = imp.clear_cache();
-                Some(serde_json::Value::from(result))
-            }
-            "update_account" => {
-                if args.len() < 2 {
-                    return None;
-                }
-                let result = imp.update_account(
-                    args.get(0)
-                        .unwrap_or(&serde_json::Value::Null)
-                        .as_str()
-                        .unwrap_or_default()
-                        .to_string(),
-                    args.get(1)
-                        .unwrap_or(&serde_json::Value::Null)
-                        .as_str()
-                        .unwrap_or_default()
-                        .to_string(),
-                );
                 Some(serde_json::Value::from(result))
             }
             "get_value" => {
@@ -237,21 +185,6 @@ pub fn install<T: LogosAccountsModule + Default>() {
                 let result = imp.get_value(arg_str(args, 0), arg_str(args, 1));
                 Some(serde_json::Value::from(result))
             }
-            "delegate_path" => {
-                if args.len() < 3 {
-                    return None;
-                }
-                let result =
-                    imp.delegate_path(arg_str(args, 0), arg_str(args, 1), arg_str(args, 2));
-                Some(serde_json::Value::from(result))
-            }
-            "revoke_path" => {
-                if args.len() < 2 {
-                    return None;
-                }
-                let result = imp.revoke_path(arg_str(args, 0), arg_str(args, 1));
-                Some(serde_json::Value::from(result))
-            }
             "list_delegations" => {
                 if args.is_empty() {
                     return None;
@@ -259,34 +192,26 @@ pub fn install<T: LogosAccountsModule + Default>() {
                 let result = imp.list_delegations(arg_str(args, 0));
                 Some(serde_json::Value::from(result))
             }
-            "update_path" => {
-                if args.len() < 3 {
-                    return None;
-                }
-                let result = imp.update_path(arg_str(args, 0), arg_str(args, 1), arg_str(args, 2));
-                Some(serde_json::Value::from(result))
-            }
-            "prepare_path_update" => {
-                if args.len() < 3 {
-                    return None;
-                }
-                let result =
-                    imp.prepare_path_update(arg_str(args, 0), arg_str(args, 1), arg_str(args, 2));
-                Some(serde_json::Value::from(result))
-            }
-            "commit_path_update" => {
-                if args.len() < 3 {
-                    return None;
-                }
-                let result =
-                    imp.commit_path_update(arg_str(args, 0), arg_str(args, 1), arg_str(args, 2));
-                Some(serde_json::Value::from(result))
-            }
-            "cancel_path_update" => {
+            "prepare_update" => {
                 if args.len() < 2 {
                     return None;
                 }
-                let result = imp.cancel_path_update(arg_str(args, 0), arg_str(args, 1));
+                let result = imp.prepare_update(arg_str(args, 0), arg_str(args, 1));
+                Some(serde_json::Value::from(result))
+            }
+            "commit_update" => {
+                if args.len() < 3 {
+                    return None;
+                }
+                let result =
+                    imp.commit_update(arg_str(args, 0), arg_str(args, 1), arg_str(args, 2));
+                Some(serde_json::Value::from(result))
+            }
+            "cancel_update" => {
+                if args.len() < 2 {
+                    return None;
+                }
+                let result = imp.cancel_update(arg_str(args, 0), arg_str(args, 1));
                 Some(serde_json::Value::from(result))
             }
             _ => None,
@@ -356,25 +281,21 @@ pub extern "C" fn logos_module_dispatch(
 pub extern "C" fn logos_module_get_methods() -> *mut c_char {
     to_c_string(
         r#"[
-{"isInvokable":true,"name":"create_account","parameters":[{"name":"storage_json","type":"QString"}],"returnType":"QString","signature":"create_account(QString)"},
-{"isInvokable":true,"name":"import_plog","parameters":[{"name":"plog_b64","type":"QString"},{"name":"storage_json","type":"QString"}],"returnType":"QString","signature":"import_plog(QString,QString)"},
+{"isInvokable":true,"name":"create_account","parameters":[{"name":"pubkey_multibase","type":"QString"}],"returnType":"QString","signature":"create_account(QString)"},
+{"isInvokable":true,"name":"import_plog","parameters":[{"name":"plog_b64","type":"QString"}],"returnType":"QString","signature":"import_plog(QString)"},
 {"isInvokable":true,"name":"export_plog","parameters":[{"name":"vlad","type":"QString"}],"returnType":"QString","signature":"export_plog(QString)"},
 {"isInvokable":true,"name":"remove_plog","parameters":[{"name":"vlad","type":"QString"}],"returnType":"QString","signature":"remove_plog(QString)"},
 {"isInvokable":true,"name":"clear_cache","parameters":[],"returnType":"QString","signature":"clear_cache()"},
-{"isInvokable":true,"name":"update_account","parameters":[{"name":"vlad","type":"QString"},{"name":"ops_json","type":"QString"}],"returnType":"QString","signature":"update_account(QString,QString)"},
 {"isInvokable":true,"name":"get_value","parameters":[{"name":"vlad","type":"QString"},{"name":"path","type":"QString"}],"returnType":"QString","signature":"get_value(QString,QString)"},
-{"isInvokable":true,"name":"delegate_path","parameters":[{"name":"vlad","type":"QString"},{"name":"path","type":"QString"},{"name":"pubkey_multibase","type":"QString"}],"returnType":"QString","signature":"delegate_path(QString,QString,QString)"},
-{"isInvokable":true,"name":"revoke_path","parameters":[{"name":"vlad","type":"QString"},{"name":"path","type":"QString"}],"returnType":"QString","signature":"revoke_path(QString,QString)"},
 {"isInvokable":true,"name":"list_delegations","parameters":[{"name":"vlad","type":"QString"}],"returnType":"QString","signature":"list_delegations(QString)"},
-{"isInvokable":true,"name":"update_path","parameters":[{"name":"vlad","type":"QString"},{"name":"path","type":"QString"},{"name":"ops_json","type":"QString"}],"returnType":"QString","signature":"update_path(QString,QString,QString)"},
-{"isInvokable":true,"name":"prepare_path_update","parameters":[{"name":"vlad","type":"QString"},{"name":"path","type":"QString"},{"name":"ops_json","type":"QString"}],"returnType":"QString","signature":"prepare_path_update(QString,QString,QString)"},
-{"isInvokable":true,"name":"commit_path_update","parameters":[{"name":"vlad","type":"QString"},{"name":"challenge_id","type":"QString"},{"name":"signature_multibase","type":"QString"}],"returnType":"QString","signature":"commit_path_update(QString,QString,QString)"},
-{"isInvokable":true,"name":"cancel_path_update","parameters":[{"name":"vlad","type":"QString"},{"name":"challenge_id","type":"QString"}],"returnType":"QString","signature":"cancel_path_update(QString,QString)"},
+{"isInvokable":true,"name":"prepare_update","parameters":[{"name":"vlad","type":"QString"},{"name":"request_json","type":"QString"}],"returnType":"QString","signature":"prepare_update(QString,QString)"},
+{"isInvokable":true,"name":"commit_update","parameters":[{"name":"vlad","type":"QString"},{"name":"challenge_id","type":"QString"},{"name":"signature_multibase","type":"QString"}],"returnType":"QString","signature":"commit_update(QString,QString,QString)"},
+{"isInvokable":true,"name":"cancel_update","parameters":[{"name":"vlad","type":"QString"},{"name":"challenge_id","type":"QString"}],"returnType":"QString","signature":"cancel_update(QString,QString)"},
 {"name":"account_created","parameters":[{"name":"vlad","type":"QString"}],"signature":"account_created(QString)","type":"event"},
 {"name":"account_updated","parameters":[{"name":"head_cid","type":"QString"}],"signature":"account_updated(QString)","type":"event"},
 {"name":"path_delegated","parameters":[{"name":"vlad","type":"QString"},{"name":"path","type":"QString"}],"signature":"path_delegated(QString,QString)","type":"event"},
 {"name":"path_revoked","parameters":[{"name":"vlad","type":"QString"},{"name":"path","type":"QString"}],"signature":"path_revoked(QString,QString)","type":"event"},
-{"name":"card_error","parameters":[{"name":"message","type":"QString"}],"signature":"card_error(QString)","type":"event"}
+{"name":"error","parameters":[{"name":"message","type":"QString"}],"signature":"error(QString)","type":"event"}
 ]"#
         .replace('\n', "")
         .to_string(),
