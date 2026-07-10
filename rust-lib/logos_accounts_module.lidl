@@ -1,6 +1,6 @@
 module logos_accounts_module {
-  version "5.0.0"
-  description "BetterSign p-log cache: one-shot ephemeral open, external Multisig for mutations"
+  version "1.0.0"
+  description "BetterSign p-log cache: ephemeral open, raw lock+ops prepare, delegate/revoke sugar, external Multisig"
 
   method create_account(pubkey_multibase: string) -> string
 
@@ -12,7 +12,12 @@ module logos_accounts_module {
   method get_value(vlad: string, path: string) -> string
   method list_delegations(vlad: string) -> string
 
+  /// Raw next entry: request_json with locks + ops (noop/update/delete).
   method prepare_update(vlad: string, request_json: string) -> string
+  /// Sugar: lock upsert + {path}pubkey; closest-parent or root signs.
+  method prepare_delegate(vlad: string, path: string, pubkey_multibase: string) -> string
+  /// Sugar: lock remove + {path}pubkey delete; closest-parent or root signs.
+  method prepare_revoke(vlad: string, path: string) -> string
   method commit_update(vlad: string, challenge_id: string, signature_multibase: string) -> string
   method cancel_update(vlad: string, challenge_id: string) -> string
 

@@ -40,6 +40,21 @@ impl AccountsModuleImpl {
     fn entry(&self, vlad: &str) -> Result<std::sync::Arc<std::sync::Mutex<PlogAccount>>, String> {
         self.cache.get(vlad).map_err(|e| e.to_string())
     }
+
+    fn with_account_mut<F>(&self, vlad: &str, f: F) -> String
+    where
+        F: FnOnce(&mut PlogAccount) -> String,
+    {
+        let entry = match self.entry(vlad) {
+            Ok(e) => e,
+            Err(e) => return Self::err_json(e),
+        };
+        let mut guard = match entry.lock() {
+            Ok(g) => g,
+            Err(e) => return Self::err_json(format!("cache entry lock poisoned: {e}")),
+        };
+        f(&mut guard)
+    }
 }
 
 impl LogosAccountsModule for AccountsModuleImpl {
@@ -135,19 +150,34 @@ impl LogosAccountsModule for AccountsModuleImpl {
     }
 
     fn prepare_update(&mut self, vlad: String, request_json: String) -> String {
-        let entry = match self.entry(&vlad) {
-            Ok(e) => e,
-            Err(e) => return Self::err_json(e),
-        };
-        let mut guard = match entry.lock() {
-            Ok(g) => g,
-            Err(e) => return Self::err_json(format!("cache entry lock poisoned: {e}")),
-        };
-        match guard.prepare_update(&request_json) {
+        self.with_account_mut(&vlad, |acct| match acct.prepare_update(&request_json) {
             Ok(challenge) => serde_json::to_string(&challenge)
                 .unwrap_or_else(|e| Self::err_json(e.to_string())),
             Err(e) => Self::err_json(e.to_string()),
-        }
+        })
+    }
+
+    fn prepare_delegate(
+        &mut self,
+        vlad: String,
+        path: String,
+        pubkey_multibase: String,
+    ) -> String {
+        self.with_account_mut(&vlad, |acct| {
+            match acct.prepare_delegate(&path, &pubkey_multibase) {
+                Ok(challenge) => serde_json::to_string(&challenge)
+                    .unwrap_or_else(|e| Self::err_json(e.to_string())),
+                Err(e) => Self::err_json(e.to_string()),
+            }
+        })
+    }
+
+    fn prepare_revoke(&mut self, vlad: String, path: String) -> String {
+        self.with_account_mut(&vlad, |acct| match acct.prepare_revoke(&path) {
+            Ok(challenge) => serde_json::to_string(&challenge)
+                .unwrap_or_else(|e| Self::err_json(e.to_string())),
+            Err(e) => Self::err_json(e.to_string()),
+        })
     }
 
     fn commit_update(

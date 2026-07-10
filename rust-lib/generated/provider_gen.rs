@@ -88,6 +88,13 @@ pub trait LogosAccountsModule: Send + 'static {
     fn get_value(&mut self, vlad: String, path: String) -> String;
     fn list_delegations(&mut self, vlad: String) -> String;
     fn prepare_update(&mut self, vlad: String, request_json: String) -> String;
+    fn prepare_delegate(
+        &mut self,
+        vlad: String,
+        path: String,
+        pubkey_multibase: String,
+    ) -> String;
+    fn prepare_revoke(&mut self, vlad: String, path: String) -> String;
     fn commit_update(
         &mut self,
         vlad: String,
@@ -199,6 +206,21 @@ pub fn install<T: LogosAccountsModule + Default>() {
                 let result = imp.prepare_update(arg_str(args, 0), arg_str(args, 1));
                 Some(serde_json::Value::from(result))
             }
+            "prepare_delegate" => {
+                if args.len() < 3 {
+                    return None;
+                }
+                let result =
+                    imp.prepare_delegate(arg_str(args, 0), arg_str(args, 1), arg_str(args, 2));
+                Some(serde_json::Value::from(result))
+            }
+            "prepare_revoke" => {
+                if args.len() < 2 {
+                    return None;
+                }
+                let result = imp.prepare_revoke(arg_str(args, 0), arg_str(args, 1));
+                Some(serde_json::Value::from(result))
+            }
             "commit_update" => {
                 if args.len() < 3 {
                     return None;
@@ -289,6 +311,8 @@ pub extern "C" fn logos_module_get_methods() -> *mut c_char {
 {"isInvokable":true,"name":"get_value","parameters":[{"name":"vlad","type":"QString"},{"name":"path","type":"QString"}],"returnType":"QString","signature":"get_value(QString,QString)"},
 {"isInvokable":true,"name":"list_delegations","parameters":[{"name":"vlad","type":"QString"}],"returnType":"QString","signature":"list_delegations(QString)"},
 {"isInvokable":true,"name":"prepare_update","parameters":[{"name":"vlad","type":"QString"},{"name":"request_json","type":"QString"}],"returnType":"QString","signature":"prepare_update(QString,QString)"},
+{"isInvokable":true,"name":"prepare_delegate","parameters":[{"name":"vlad","type":"QString"},{"name":"path","type":"QString"},{"name":"pubkey_multibase","type":"QString"}],"returnType":"QString","signature":"prepare_delegate(QString,QString,QString)"},
+{"isInvokable":true,"name":"prepare_revoke","parameters":[{"name":"vlad","type":"QString"},{"name":"path","type":"QString"}],"returnType":"QString","signature":"prepare_revoke(QString,QString)"},
 {"isInvokable":true,"name":"commit_update","parameters":[{"name":"vlad","type":"QString"},{"name":"challenge_id","type":"QString"},{"name":"signature_multibase","type":"QString"}],"returnType":"QString","signature":"commit_update(QString,QString,QString)"},
 {"isInvokable":true,"name":"cancel_update","parameters":[{"name":"vlad","type":"QString"},{"name":"challenge_id","type":"QString"}],"returnType":"QString","signature":"cancel_update(QString,QString)"},
 {"name":"account_created","parameters":[{"name":"vlad","type":"QString"}],"signature":"account_created(QString)","type":"event"},

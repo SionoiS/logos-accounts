@@ -1,39 +1,38 @@
 # logos-accounts
 
-BetterSign provenance-log **cache** packaged as a [Logos](https://github.com/logos-co) module. This process **never holds long-lived private keys**.
+BetterSign provenance-log **cache** packaged as a [Logos](https://github.com/logos-co) module. Identity is VLAD + provenance log (p-log) from the [BetterSign](https://github.com/cryptidtech/bs) stack. Users call the LIDL surface generated through [logos-rust-sdk](https://github.com/logos-co/logos-rust-sdk).
 
 | Status | Detail |
 |--------|--------|
 | Crate | `logos_accounts` **0.1.0** (`rust-lib/`) |
-| LIDL contract | `logos_accounts_module` **5.0.0** |
+| LIDL contract | `logos_accounts_module` **1.0.0** |
 | Module metadata | `logos_accounts_module` **1.0.0** (`metadata.json`) |
-| Keys | Peer root Multikey at create; all later signs are **external Multisig** |
+| Keys | Ephemeral Multikey used at creation; all later signs are **external Multisig** |
 | Cache | In-process multi-account `AccountCache`, keyed by `SHA-256(VLAD)` |
-
-Identity is VLAD + provenance log (p-log) from the [BetterSign](https://github.com/cryptidtech/bs) stack. Peer modules call the LIDL surface generated through [logos-rust-sdk](https://github.com/logos-co/logos-rust-sdk).
 
 ## Architecture
 
 ```text
-Peer (holds root /pubkey secret)
+User (holds root /pubkey secret)
   │  create_account(pubkey_multibase)
   ▼
-logos-accounts  — software ephemerals for VLAD + /entrykey only (discarded)
-                — publishes peer Multikey at /pubkey
-  │  prepare_update → message_multibase
-  │  peer Multikey.sign(entry-bytes)
+logos-accounts  — ephemerals keys for VLAD + /entrykey
+                — publishes user Multikey at /pubkey
+  │  prepare_update | prepare_delegate | prepare_revoke
+  │       → message_multibase + signing_key_path
+  │  user Multikey.sign(entry-bytes)
   │  commit_update(signature_multibase)
   ▼
 AccountCache → PlogAccount { log, pending challenges }
 ```
 
-### Create (one-shot)
+### Create
 
 | Step | Key | Who |
 |------|-----|-----|
-| VLAD binding | Ephemeral Multikey | Module (discarded) |
-| First entry proof | Ephemeral `/entrykey` | Module (discarded) |
-| Long-lived `/pubkey` | Peer Multikey (public) | Caller supplies `pubkey_multibase` |
+| VLAD binding | Ephemeral Multikey | Module |
+| First entry proof | Ephemeral `/entrykey` | Module |
+| Long-lived `/pubkey` | User Multikey (public) | Caller supplies `pubkey_multibase` |
 
 Root **private** keys never enter this module. Subsequent entries require external Multisig from `/pubkey` (or a delegated path key).
 
@@ -41,20 +40,49 @@ Root **private** keys never enter this module. Subsequent entries require extern
 
 Every post-open write:
 
-1. `prepare_update(vlad, request_json)` → challenge with `message_multibase` (unsigned entry bytes)
-2. Peer signs with Multikey (entry-bytes encoding)
+1. Prepare → challenge with `message_multibase` (unsigned entry bytes) and `signing_key_path`
+2. User signs with Multikey (entry-bytes encoding)
 3. `commit_update(vlad, challenge_id, signature_multibase)` → verified append
 
-`request_json` kinds:
+#### New entree — `prepare_update(vlad, request_json)`
+
+Author the next entry's **locks** (policy for the *following* entry) and **ops** (KVP mutations).
 
 ```json
-{ "kind": "ops", "ops": [ {"op":"use_str","key":"/profile/name","value":"alice"} ] }
-{ "kind": "delegate", "path": "/apps/chat/", "pubkey_multibase": "…" }
-{ "kind": "revoke", "path": "/apps/chat/" }
-{ "kind": "path_ops", "path": "/apps/chat/", "ops": [ … ] }
+{
+  "locks": "inherit",
+  "ops": [
+    { "op": "update", "key": "/profile/name", "value": { "str": "alice" } },
+    { "op": "update", "key": "/avatar", "value": { "data": "u…" } },
+    { "op": "delete", "key": "/profile/old" },
+    { "op": "noop", "key": "/touch/" }
+  ],
+  "sign_as": "/pubkey"
+}
 ```
 
-## Logos module (LIDL 5.0.0)
+| Field | Notes |
+|-------|--------|
+| `locks` | `"inherit"` (default), `{ "replace": [ { "path", "code" } ] }`, `{ "upsert": { "path", "code" } }`, `{ "remove": "/apps/chat/" }` |
+| `ops` | `noop`, `delete` or `update` with `value`: `{ "str" }` or `{ "data" }` |
+| `sign_as` | Optional Multikey path for the user; default `/pubkey` |
+
+
+#### Helpers — `prepare_delegate` / `prepare_revoke`
+
+| Method | Expands to |
+|--------|------------|
+| `prepare_delegate(vlad, path, pubkey_multibase)` | lock `upsert` for `path` + `update` `{path}pubkey` |
+| `prepare_revoke(vlad, path)` | lock `remove` for `path` + `delete` `{path}pubkey` |
+
+**Closest-parent signing:** among active path delegations, pick the longest **proper ancestor** of `path`; use `{ancestor}pubkey`. If none, use `/pubkey`.
+
+Examples:
+- no path → root
+- only `/apps/` → nested `/apps/chat/` signs as `/apps/pubkey`
+- sibling path `/other/` with only `/apps/` → root.
+
+## Logos module (LIDL 1.0.0)
 
 ```text
 module logos_accounts_module {
@@ -66,6 +94,8 @@ module logos_accounts_module {
   method get_value(vlad: string, path: string) -> string
   method list_delegations(vlad: string) -> string
   method prepare_update(vlad: string, request_json: string) -> string
+  method prepare_delegate(vlad: string, path: string, pubkey_multibase: string) -> string
+  method prepare_revoke(vlad: string, path: string) -> string
   method commit_update(vlad: string, challenge_id: string, signature_multibase: string) -> string
   method cancel_update(vlad: string, challenge_id: string) -> string
 
@@ -79,12 +109,14 @@ module logos_accounts_module {
 
 | Method | Behavior |
 |--------|----------|
-| `create_account` | Ephemeral open + external root Multikey; cache insert |
+| `create_account` | Ephemeral keys + external root Multikey; cache insert |
 | `import_plog` | Full-chain verify; upsert by VLAD hash |
 | `export_plog` / `remove_plog` / `clear_cache` | Cache lifecycle |
 | `get_value` | Read path from verified head KVP |
 | `list_delegations` | Active path → Multikey grants |
-| `prepare_update` / `commit_update` | External Multisig mutations |
+| `prepare_update` | Raw locks + ops for external Multisig |
+| `prepare_delegate` / `prepare_revoke` | Sugar over lock + KV; closest-parent sign |
+| `commit_update` | Append with Multisig proof |
 | `cancel_update` | Drop a pending challenge |
 
 Errors are JSON `{"error":"..."}` and also emit the `error` event.
@@ -115,5 +147,5 @@ rust-lib/
 ## Out of scope
 
 - Holding long-lived private keys (wallets, HSMs, Keycard) inside this module
-- Peer UX for key generation / storage
+- User UX for key generation / storage
 - Factory reset or card administration

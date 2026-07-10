@@ -8,8 +8,10 @@
 //!
 //! # Mutations
 //!
-//! All post-open writes use prepare → external Multisig → commit
-//! ([`PlogAccount::prepare_update`] / [`PlogAccount::commit_update`]).
+//! All post-open writes use prepare → external Multisig → commit.
+//! Raw entries: [`PlogAccount::prepare_update`] (locks + ops).
+//! Sugar: [`PlogAccount::prepare_delegate`] / [`PlogAccount::prepare_revoke`].
+//! Commit: [`PlogAccount::commit_update`].
 //!
 //! # Logos module
 //!
@@ -51,9 +53,10 @@ mod verifier;
 mod vlad_hash;
 
 pub use api::{
-    ensure_plog_verified, get_plog_value, parse_ops_json, parse_update_request_json, AccountOp,
-    AccountSummary, PathDelegation, PlogAccount, PlogPathValue, UpdateChallenge, UpdateKind,
-    UpdateRequest,
+    ensure_plog_verified, get_plog_value, parse_entry_update_request, parse_ops_json,
+    resolve_closest_parent_signing_key, AccountSummary, EntryUpdateRequest, LockScriptJson,
+    LockSpec, PathDelegation, PlogAccount, PlogOp, PlogPathValue, PlogValue, UpdateChallenge,
+    UpdateKind,
 };
 pub use cache::{AccountCache, VladHash};
 pub use config::{
