@@ -33,8 +33,8 @@ mod provider_scaffold {
 }
 
 pub use provider_scaffold::{
-    context, emit_account_created, emit_account_updated, emit_card_error, install,
-    LogosAccountsModule, RustModuleContext,
+    context, emit_account_created, emit_account_updated, emit_card_error, emit_path_delegated,
+    emit_path_revoked, install, LogosAccountsModule, RustModuleContext,
 };
 
 mod api;
@@ -43,6 +43,7 @@ mod cache;
 mod config;
 mod convert;
 mod encoding;
+mod entry_update;
 mod error;
 mod keycard_lifecycle;
 mod keycard_session;
@@ -54,7 +55,7 @@ mod wallet;
 
 pub use api::{
     ensure_plog_verified, get_plog_value, parse_ops_json, AccountOp, AccountSummary, AccountsApi,
-    PlogPathValue, SoftwareAccountsApi, SoftwareWallet,
+    PathDelegation, PathUpdateChallenge, PlogPathValue, SoftwareAccountsApi, SoftwareWallet,
 };
 pub use binding::{
     parse_card_vlad_hash, verify_card_vlad_binding, vlad_hash, vlad_hash_from_multibase,
@@ -62,8 +63,10 @@ pub use binding::{
 };
 pub use cache::{AccountCache, CachedAccount, VladHash};
 pub use config::{
-    default_open_config, default_update_config, pubkey_key_path, update_config_with_ops,
-    DEFAULT_ENTRY_LOCK, DEFAULT_ENTRY_UNLOCK,
+    default_open_config, default_update_config, delegate_pubkey_key, delegated_branch_lock_script,
+    delegated_lock_code, key_under_branch, parse_branch_path, pubkey_key_path,
+    update_config_with_ops, update_config_with_signing_key, DEFAULT_ENTRY_LOCK,
+    DEFAULT_ENTRY_UNLOCK,
 };
 pub use convert::{
     alloy_signature_to_multisig, multikey_to_sec1, public_key_to_multikey, require_secp256k1_priv,

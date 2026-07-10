@@ -7,7 +7,7 @@ Long-lived signing can run in-process (tests / CI) or on a [Keycard](https://git
 | Status | Detail |
 |--------|--------|
 | Crate | `logos_accounts` **0.1.0** (`rust-lib/`) |
-| LIDL contract | `logos_accounts_module` **3.0.0** |
+| LIDL contract | `logos_accounts_module` **4.0.0** |
 | Module metadata | `logos_accounts_module` **1.0.0** (`metadata.json`) |
 | Key storage | `local` (default for CI) or `keycard` (`pcsc` feature) |
 | Cache | In-process multi-account `AccountCache`, keyed by `SHA-256(VLAD)` |
@@ -38,7 +38,7 @@ Keycard is secp256k1-only, signs a 32-byte SHA-256 prehash, and exports public k
 | Long-lived `/pubkey` | Keycard BIP32 (default `m/44'/60'/0'/0/0`) | `export_key` + `sign` on prehash |
 | Verification | Software | Multikey `verify_view()` — no card I/O |
 
-## Logos module (LIDL 3.0.0)
+## Logos module (LIDL 4.0.0)
 
 ```text
 module logos_accounts_module {
@@ -52,8 +52,21 @@ module logos_accounts_module {
   method update_account(vlad: string, ops_json: string) -> string
   method get_value(vlad: string, path: string) -> string
 
+  // Path delegation (root-signed policy)
+  method delegate_path(vlad: string, path: string, pubkey_multibase: string) -> string
+  method revoke_path(vlad: string, path: string) -> string
+  method list_delegations(vlad: string) -> string
+
+  // Writes under a delegated path
+  method update_path(vlad: string, path: string, ops_json: string) -> string
+  method prepare_path_update(vlad: string, path: string, ops_json: string) -> string
+  method commit_path_update(vlad: string, challenge_id: string, signature_multibase: string) -> string
+  method cancel_path_update(vlad: string, challenge_id: string) -> string
+
   event account_created(vlad: string)
   event account_updated(head_cid: string)
+  event path_delegated(vlad: string, path: string)
+  event path_revoked(vlad: string, path: string)
   event card_error(message: string)
 }
 ```
@@ -63,8 +76,31 @@ module logos_accounts_module {
 | `create_account` | Opens p-log, verifies, inserts into cache; returns `vlad` (+ optional Keycard credentials) |
 | `import_plog` | Full-chain verify required; upserts by VLAD hash only on success |
 | `export_plog` / `remove_plog` / `clear_cache` | Cache lifecycle |
-| `update_account` | Append ops signed with `/pubkey` |
+| `update_account` | Append ops signed with `/pubkey` (owner control plane) |
 | `get_value` | Read any path from the verified head KVP (`{"type":"str"\|"bin","value":...}`) |
+| `delegate_path` | Root-signed: publish `{path}pubkey` and install a path lock for that branch |
+| `revoke_path` | Root-signed: remove path lock and delete `{path}pubkey` |
+| `list_delegations` | Read-only list of active path → Multikey grants |
+| `update_path` | One-shot write under a delegated branch when this module holds the delegate key |
+| `prepare_path_update` / `commit_path_update` | Two-phase external sign: peer signs opaque entry bytes without building a p-log entry |
+| `cancel_path_update` | Drop a pending prepare challenge |
+
+### Path delegation
+
+Account owner (root `/pubkey`) can grant write authority over a branch such as `/apps/chat/` to an external Multikey. Subsequent entries whose ops stay under that branch may be signed by the delegate alone. Peers that hold their own keys use prepare → sign → commit; they never construct lock scripts, Lipmaa links, or entry proofs.
+
+```text
+// Owner
+delegate_path(vlad, "/apps/chat/", peer_pubkey_multibase)
+
+// Peer (external key)
+prepare_path_update(vlad, "/apps/chat/", ops_json)
+  → { challenge_id, message_multibase, signing_key_path, … }
+// peer signs message_multibase with Multikey.sign (entry-bytes)
+commit_path_update(vlad, challenge_id, signature_multibase)
+```
+
+Ops outside the declared branch are rejected at the LIDL/domain layer. Changing locks always requires root (BetterSign forces root lock when the lock set changes).
 
 Types cross the LIDL boundary as encoded strings (JSON / multibase). Errors are JSON `{"error":"..."}`.
 
@@ -157,6 +193,7 @@ Nix packaging: `flake.nix` builds via `logos-module-builder` when available.
 - Factory-reset API (use external tooling)
 - PIN change, unpair UI, multi-account per card
 - Multi-threshold / Lamport VLAD paths
+- Nested re-delegation by non-root parties
 - Encryption / secret-sharing
 - Network publication of p-logs (export only)
 - Encrypted on-disk keystore (local storage is in-memory)

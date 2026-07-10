@@ -5,10 +5,19 @@
 //! on top; this type remains one wallet + one p-log. Create/load verify the p-log
 //! chain before the account is considered loaded; path reads use [`AccountsApi::get_value`].
 
-use crate::config::{default_open_config, default_update_config, update_config_with_ops};
+use crate::config::{
+    default_open_config, default_unlock_script, default_update_config, delegate_pubkey_key,
+    delegated_branch_lock_script, key_under_branch, parse_branch_path, pubkey_key_path,
+    update_config_with_ops, update_config_with_signing_key,
+};
 use crate::encoding::{
-    decode_bytes_multibase, decode_hex32, decode_plog, encode_bytes_multibase, encode_cid,
-    encode_multikey, encode_plog, encode_vlad, plog_from_bytes, plog_to_bytes,
+    decode_bytes_multibase, decode_hex32, decode_multikey, decode_multisig, decode_plog,
+    encode_bytes_multibase, encode_cid, encode_multikey, encode_plog, encode_vlad, plog_from_bytes,
+    plog_to_bytes,
+};
+use crate::entry_update::{
+    commit_with_multisig, locks_replacing_path, prepare_next_entry, use_key_op, NextEntrySpec,
+    UnsignedUpdate,
 };
 use crate::keycard_lifecycle::{
     initialize_virgin_keycard, open_and_verify_binding, store_vlad_binding, KeycardCreateSecrets,
@@ -23,10 +32,13 @@ use bs::BetterSign;
 use multicodec::Codec;
 use multikey::Multikey;
 use nexum_apdu_core::prelude::CardTransport;
-use provenance_log::{Key, Log, Value};
+use provenance_log::entry::Entry;
+use provenance_log::{Key, Log, Script, Value};
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::num::NonZeroUsize;
 use std::path::PathBuf;
+use std::time::{Duration, Instant};
 
 /// Summary returned by create/load/update — LIDL-friendly strings.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -196,6 +208,85 @@ fn parse_key(s: &str) -> Result<Key, Error> {
     Key::try_from(s).map_err(|e| Error::InvalidOp(format!("invalid key path {s}: {e}")))
 }
 
+fn ensure_ops_under_branch(ops: &[OpParams], branch: &Key) -> Result<(), Error> {
+    if ops.is_empty() {
+        return Err(Error::InvalidOp(
+            "path update requires at least one operation".into(),
+        ));
+    }
+    let pk_key = delegate_pubkey_key(branch)?;
+    for op in ops {
+        let key = op_key(op)?;
+        if key == pk_key {
+            return Err(Error::InvalidOp(format!(
+                "cannot modify delegation key {pk_key} via path update; use revoke_path / delegate_path"
+            )));
+        }
+        if !key_under_branch(&key, branch) {
+            return Err(Error::PathEscape(branch.to_string(), key.to_string()));
+        }
+    }
+    Ok(())
+}
+
+fn op_key(op: &OpParams) -> Result<Key, Error> {
+    match op {
+        OpParams::Noop { key }
+        | OpParams::Delete { key }
+        | OpParams::UseStr { key, .. }
+        | OpParams::UseBin { key, .. }
+        | OpParams::UseKey { key, .. }
+        | OpParams::UseCid { key, .. }
+        | OpParams::KeyGen { key, .. }
+        | OpParams::CidGen { key, .. } => Ok(key.clone()),
+    }
+}
+
+fn new_challenge_id() -> String {
+    use rand_core::{OsRng, RngCore};
+    let mut buf = [0u8; 16];
+    OsRng.fill_bytes(&mut buf);
+    encode_bytes_multibase(&buf)
+}
+
+/// How long a prepare/commit challenge remains valid.
+const CHALLENGE_TTL: Duration = Duration::from_secs(15 * 60);
+
+/// Pending path update awaiting an external signature.
+struct PendingPathUpdate {
+    head_cid: String,
+    unsigned: UnsignedUpdate,
+    created_at: Instant,
+}
+
+/// One delegated branch as seen at the verified head.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PathDelegation {
+    /// Branch path (trailing `/`), e.g. `/apps/chat/`.
+    pub path: String,
+    /// Multibase Multikey at `{path}pubkey`.
+    pub pubkey: String,
+}
+
+/// Opaque prepare response for external signers (LIDL JSON).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PathUpdateChallenge {
+    /// Opaque id for [`AccountsApi::commit_path_update`].
+    pub challenge_id: String,
+    /// Account VLAD (multibase).
+    pub vlad: String,
+    /// Delegated branch path.
+    pub path: String,
+    /// Logical key path the peer must sign as (e.g. `/apps/chat/pubkey`).
+    pub signing_key_path: String,
+    /// Head CID at prepare time (commit fails if head moved).
+    pub head_cid: String,
+    /// Message to sign (unsigned entry bytes, multibase).
+    pub message_multibase: String,
+    /// Encoding of `message_multibase` (`entry-bytes`).
+    pub message_encoding: String,
+}
+
 /// IPC-friendly accounts service.
 ///
 /// Holds an optional wallet and an optional open BetterSign account.
@@ -212,6 +303,8 @@ pub struct AccountsApi<W> {
     persistence_path: Option<PathBuf>,
     /// BIP32 derivation currently intended for `/pubkey`.
     pubkey_derivation: String,
+    /// In-process prepare/commit challenges (external signers).
+    pending: HashMap<String, PendingPathUpdate>,
 }
 
 impl<W> Default for AccountsApi<W> {
@@ -227,6 +320,7 @@ impl<W> std::fmt::Debug for AccountsApi<W> {
             .field("has_account", &self.account.is_some())
             .field("persistence_path", &self.persistence_path)
             .field("pubkey_derivation", &self.pubkey_derivation)
+            .field("pending_challenges", &self.pending.len())
             .finish()
     }
 }
@@ -239,6 +333,7 @@ impl<W> AccountsApi<W> {
             account: None,
             persistence_path: None,
             pubkey_derivation: DEFAULT_PUBKEY_PATH.to_string(),
+            pending: HashMap::new(),
         }
     }
 
@@ -282,6 +377,7 @@ impl<W> AccountsApi<W> {
     /// Take the wallet out (disconnect), dropping any loaded account.
     pub fn disconnect(&mut self) -> Option<W> {
         self.account = None;
+        self.pending.clear();
         self.wallet.take()
     }
 
@@ -295,6 +391,17 @@ impl<W> AccountsApi<W> {
 
     fn require_account_mut(&mut self) -> Result<&mut BetterSign<W, W, Error>, Error> {
         self.account.as_mut().ok_or(Error::NoAccount)
+    }
+
+    fn purge_expired_challenges(&mut self) {
+        let now = Instant::now();
+        self.pending
+            .retain(|_, p| now.duration_since(p.created_at) < CHALLENGE_TTL);
+    }
+
+    fn current_head_cid(&self) -> Result<String, Error> {
+        let log = self.require_account_ref()?.plog();
+        Ok(encode_cid(&log.head))
     }
 }
 
@@ -357,7 +464,262 @@ where
         };
         let account = self.require_account_mut()?;
         account.update(cfg).await?;
+        self.pending.clear();
         summary_from_verified_plog(self.require_account_ref()?.plog())
+    }
+
+    /// Grant write authority over a branch to an external Multikey (root-signed).
+    ///
+    /// Publishes `{path}pubkey` and installs a path lock:
+    /// `check_signature(branch("pubkey"), "/entry/")`.
+    pub async fn delegate_path(
+        &mut self,
+        path: &str,
+        pubkey_multibase: &str,
+    ) -> Result<AccountSummary, Error> {
+        let branch = parse_branch_path(path)?;
+        let mk = decode_multikey(pubkey_multibase)?;
+        let pk_key = delegate_pubkey_key(&branch)?;
+
+        let head = {
+            let log = self.require_account_ref()?.plog();
+            let (_, last, _) = log
+                .verify()
+                .last()
+                .ok_or_else(|| Error::PlogVerifyFailed("empty provenance log".into()))??;
+            last
+        };
+
+        let lock = delegated_branch_lock_script(branch.clone());
+        let locks = locks_replacing_path(&head, &branch, Some(lock));
+        let ops = vec![use_key_op(pk_key, mk)];
+
+        self.append_signed_with_root(NextEntrySpec {
+            unlock: default_unlock_script(),
+            locks: Some(locks),
+            ops,
+        })
+        .await
+    }
+
+    /// Revoke a previously granted path delegation (root-signed).
+    pub async fn revoke_path(&mut self, path: &str) -> Result<AccountSummary, Error> {
+        let branch = parse_branch_path(path)?;
+        let pk_key = delegate_pubkey_key(&branch)?;
+
+        let head = {
+            let log = self.require_account_ref()?.plog();
+            let (_, last, _) = log
+                .verify()
+                .last()
+                .ok_or_else(|| Error::PlogVerifyFailed("empty provenance log".into()))??;
+            last
+        };
+
+        let locks = locks_replacing_path(&head, &branch, None);
+        let ops = vec![OpParams::Delete { key: pk_key }];
+
+        self.append_signed_with_root(NextEntrySpec {
+            unlock: default_unlock_script(),
+            locks: Some(locks),
+            ops,
+        })
+        .await
+    }
+
+    /// List active path delegations at the verified head.
+    pub fn list_delegations(&self) -> Result<Vec<PathDelegation>, Error> {
+        let log = self.require_account_ref()?.plog();
+        let mut last_entry: Option<Entry> = None;
+        let mut last_kvp_keys: Vec<(Key, Value)> = Vec::new();
+        let mut any = false;
+        for item in log.verify() {
+            any = true;
+            match item {
+                Ok((_n, entry, kvp)) => {
+                    last_entry = Some(entry);
+                    last_kvp_keys = kvp.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+                }
+                Err(e) => return Err(Error::PlogVerifyFailed(e.to_string())),
+            }
+        }
+        if !any {
+            return Err(Error::PlogVerifyFailed("empty provenance log".into()));
+        }
+        let entry = last_entry.expect("any implies entry");
+
+        let mut out = Vec::new();
+        for lock in entry.locks() {
+            let path = lock.path();
+            if !path.is_branch() || path.as_str() == "/" {
+                continue;
+            }
+            // Match delegated lock body (absolute `{branch}pubkey` check).
+            let is_delegated = match lock {
+                Script::Code(p, code) => {
+                    let expected = format!(r#"check_signature("{}pubkey""#, p.as_str());
+                    code.contains(&expected)
+                        || code.contains("branch(\"pubkey\")")
+                }
+                _ => false,
+            };
+            if !is_delegated {
+                continue;
+            }
+            let pk_key = match delegate_pubkey_key(&path) {
+                Ok(k) => k,
+                Err(_) => continue,
+            };
+            let pubkey = last_kvp_keys.iter().find_map(|(k, v)| {
+                if k != &pk_key {
+                    return None;
+                }
+                match v {
+                    Value::Data(b) => Multikey::try_from(b.as_slice())
+                        .ok()
+                        .map(|mk| encode_multikey(&mk)),
+                    Value::Str(s) => Some(s.clone()),
+                    Value::Nil => None,
+                }
+            });
+            if let Some(pubkey) = pubkey {
+                out.push(PathDelegation {
+                    path: path.to_string(),
+                    pubkey,
+                });
+            }
+        }
+        out.sort_by(|a, b| a.path.cmp(&b.path));
+        Ok(out)
+    }
+
+    /// One-shot update under a delegated path, signed by a key held in this wallet.
+    ///
+    /// The wallet must be able to `try_sign` `{path}pubkey` (or use root via
+    /// [`Self::update_account`] for unrestricted writes).
+    pub async fn update_path(
+        &mut self,
+        path: &str,
+        ops_json: &str,
+    ) -> Result<AccountSummary, Error> {
+        let branch = parse_branch_path(path)?;
+        self.ensure_path_delegated(&branch)?;
+        let ops = parse_ops_json(ops_json)?;
+        ensure_ops_under_branch(&ops, &branch)?;
+        let signing_key = delegate_pubkey_key(&branch)?;
+        let cfg = update_config_with_signing_key(signing_key, ops);
+        let account = self.require_account_mut()?;
+        account.update(cfg).await?;
+        self.pending.clear();
+        summary_from_verified_plog(self.require_account_ref()?.plog())
+    }
+
+    /// Prepare an unsigned path update for an external signer (keys we do not hold).
+    pub fn prepare_path_update(
+        &mut self,
+        path: &str,
+        ops_json: &str,
+    ) -> Result<PathUpdateChallenge, Error> {
+        self.purge_expired_challenges();
+        let branch = parse_branch_path(path)?;
+        self.ensure_path_delegated(&branch)?;
+        let ops = parse_ops_json(ops_json)?;
+        ensure_ops_under_branch(&ops, &branch)?;
+
+        let vlad = self.vlad()?;
+        let head_cid = self.current_head_cid()?;
+        let signing_key = delegate_pubkey_key(&branch)?;
+        let log = self.require_account_ref()?.plog();
+        let unsigned = prepare_next_entry(
+            log,
+            NextEntrySpec {
+                unlock: default_unlock_script(),
+                locks: None,
+                ops,
+            },
+        )?;
+
+        let challenge_id = new_challenge_id();
+        let message_multibase = encode_bytes_multibase(&unsigned.message);
+        self.pending.insert(
+            challenge_id.clone(),
+            PendingPathUpdate {
+                head_cid: head_cid.clone(),
+                unsigned,
+                created_at: Instant::now(),
+            },
+        );
+
+        Ok(PathUpdateChallenge {
+            challenge_id,
+            vlad,
+            path: branch.to_string(),
+            signing_key_path: signing_key.to_string(),
+            head_cid,
+            message_multibase,
+            message_encoding: "entry-bytes".into(),
+        })
+    }
+
+    /// Commit a previously prepared path update with an external Multisig.
+    pub fn commit_path_update(
+        &mut self,
+        challenge_id: &str,
+        signature_multibase: &str,
+    ) -> Result<AccountSummary, Error> {
+        self.purge_expired_challenges();
+        let pending = self
+            .pending
+            .remove(challenge_id)
+            .ok_or_else(|| Error::ChallengeNotFound(challenge_id.to_string()))?;
+
+        let current_head = self.current_head_cid()?;
+        if current_head != pending.head_cid {
+            return Err(Error::HeadMismatch(pending.head_cid, current_head));
+        }
+
+        let signature = decode_multisig(signature_multibase)?;
+        let account = self.require_account_mut()?;
+        commit_with_multisig(account.plog_mut(), pending.unsigned.entry, signature)?;
+        self.pending.clear();
+        summary_from_verified_plog(self.require_account_ref()?.plog())
+    }
+
+    /// Drop a pending prepare challenge without committing.
+    pub fn cancel_path_update(&mut self, challenge_id: &str) -> Result<(), Error> {
+        self.purge_expired_challenges();
+        if self.pending.remove(challenge_id).is_none() {
+            return Err(Error::ChallengeNotFound(challenge_id.to_string()));
+        }
+        Ok(())
+    }
+
+    async fn append_signed_with_root(
+        &mut self,
+        spec: NextEntrySpec,
+    ) -> Result<AccountSummary, Error> {
+        let unsigned = {
+            let log = self.require_account_ref()?.plog();
+            prepare_next_entry(log, spec)?
+        };
+        let wallet = self.require_wallet_ref()?;
+        let signature = wallet.try_sign(&pubkey_key_path(), &unsigned.message).await?;
+        {
+            let account = self.require_account_mut()?;
+            commit_with_multisig(account.plog_mut(), unsigned.entry, signature)?;
+        }
+        self.pending.clear();
+        summary_from_verified_plog(self.require_account_ref()?.plog())
+    }
+
+    fn ensure_path_delegated(&self, branch: &Key) -> Result<(), Error> {
+        let delegations = self.list_delegations()?;
+        let path = branch.to_string();
+        if delegations.iter().any(|d| d.path == path) {
+            Ok(())
+        } else {
+            Err(Error::PathNotDelegated(path))
+        }
     }
 
     /// Multibase VLAD of the loaded account.
@@ -632,5 +994,166 @@ mod tests {
             PlogPathValue::Bin(s) => assert_eq!(s, pubkey_mb),
             other => panic!("expected bin pubkey, got {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn path_delegation_prepare_commit_external_key() {
+        use crate::encoding::encode_multisig;
+        use multikey::{Builder, Views};
+        use rand_core::OsRng;
+
+        let mut api = SoftwareAccountsApi::software();
+        let created = api.create_account().await.expect("create");
+
+        // External peer key (accounts does not hold the secret).
+        let sk = Builder::new_from_random_bytes(Codec::Secp256K1Priv, &mut OsRng)
+            .unwrap()
+            .try_build()
+            .unwrap();
+        let pk = sk.conv_view().unwrap().to_public_key().unwrap();
+        let pk_mb = encode_multikey(&pk);
+
+        let del = api
+            .delegate_path("/apps/chat/", &pk_mb)
+            .await
+            .expect("delegate");
+        assert_ne!(del.head_cid, created.head_cid);
+
+        let list = api.list_delegations().expect("list");
+        assert_eq!(list.len(), 1);
+        assert_eq!(list[0].path, "/apps/chat/");
+        assert_eq!(list[0].pubkey, pk_mb);
+
+        // Escape path rejected.
+        let err = api
+            .prepare_path_update(
+                "/apps/chat/",
+                r#"[{"op":"use_str","key":"/other","value":"x"}]"#,
+            )
+            .unwrap_err();
+        assert!(matches!(err, Error::PathEscape(_, _)), "{err:?}");
+
+        let challenge = api
+            .prepare_path_update(
+                "/apps/chat/",
+                r#"[{"op":"use_str","key":"/apps/chat/rooms/1","value":"general"}]"#,
+            )
+            .expect("prepare");
+        assert_eq!(challenge.signing_key_path, "/apps/chat/pubkey");
+        assert_eq!(challenge.message_encoding, "entry-bytes");
+
+        let message = decode_bytes_multibase(&challenge.message_multibase).unwrap();
+        let sig = sk
+            .sign_view()
+            .unwrap()
+            .sign(&message, false, None)
+            .unwrap();
+        let sig_mb = encode_multisig(&sig);
+
+        let committed = api
+            .commit_path_update(&challenge.challenge_id, &sig_mb)
+            .expect("commit");
+        assert_ne!(committed.head_cid, del.head_cid);
+        assert_eq!(
+            api.get_value("/apps/chat/rooms/1").unwrap(),
+            PlogPathValue::Str("general".into())
+        );
+
+        // Root can still update freely.
+        let root_up = api
+            .update_account(r#"[{"op":"use_str","key":"/profile/name","value":"alice"}]"#)
+            .await
+            .unwrap();
+        assert_ne!(root_up.head_cid, committed.head_cid);
+
+        // Revoke then prepare fails.
+        api.revoke_path("/apps/chat/").await.expect("revoke");
+        assert!(api.list_delegations().unwrap().is_empty());
+        let err = api
+            .prepare_path_update(
+                "/apps/chat/",
+                r#"[{"op":"use_str","key":"/apps/chat/rooms/1","value":"x"}]"#,
+            )
+            .unwrap_err();
+        assert!(matches!(err, Error::PathNotDelegated(_)), "{err:?}");
+    }
+
+    #[tokio::test]
+    async fn path_update_with_wallet_held_delegate_key() {
+        use multikey::{Builder, Views};
+        use rand_core::OsRng;
+
+        let mut api = SoftwareAccountsApi::software();
+        api.create_account().await.unwrap();
+
+        let sk = Builder::new_from_random_bytes(Codec::Secp256K1Priv, &mut OsRng)
+            .unwrap()
+            .try_build()
+            .unwrap();
+        let pk = sk.conv_view().unwrap().to_public_key().unwrap();
+        let pk_mb = encode_multikey(&pk);
+        api.delegate_path("/apps/chat/", &pk_mb)
+            .await
+            .expect("delegate");
+
+        // Register secret under the delegated key path so update_path can sign.
+        let wallet = api.wallet().unwrap();
+        wallet
+            .store_secret_key(
+                Key::try_from("/apps/chat/pubkey").unwrap(),
+                sk,
+            )
+            .unwrap();
+
+        let updated = api
+            .update_path(
+                "/apps/chat/",
+                r#"[{"op":"use_str","key":"/apps/chat/title","value":"Chat"}]"#,
+            )
+            .await
+            .expect("update_path");
+        assert!(!updated.head_cid.is_empty());
+        assert_eq!(
+            api.get_value("/apps/chat/title").unwrap(),
+            PlogPathValue::Str("Chat".into())
+        );
+    }
+
+    #[tokio::test]
+    async fn head_mismatch_invalidates_challenge() {
+        use crate::encoding::encode_multisig;
+        use multikey::{Builder, Views};
+        use rand_core::OsRng;
+
+        let mut api = SoftwareAccountsApi::software();
+        api.create_account().await.unwrap();
+        let sk = Builder::new_from_random_bytes(Codec::Secp256K1Priv, &mut OsRng)
+            .unwrap()
+            .try_build()
+            .unwrap();
+        let pk = sk.conv_view().unwrap().to_public_key().unwrap();
+        api.delegate_path("/apps/chat/", &encode_multikey(&pk))
+            .await
+            .unwrap();
+
+        let challenge = api
+            .prepare_path_update(
+                "/apps/chat/",
+                r#"[{"op":"use_str","key":"/apps/chat/x","value":"1"}]"#,
+            )
+            .unwrap();
+
+        // Move head with root update — pending challenges are dropped.
+        api.update_account("[]").await.unwrap();
+
+        let message = decode_bytes_multibase(&challenge.message_multibase).unwrap();
+        let sig = sk.sign_view().unwrap().sign(&message, false, None).unwrap();
+        let err = api
+            .commit_path_update(&challenge.challenge_id, &encode_multisig(&sig))
+            .unwrap_err();
+        assert!(
+            matches!(err, Error::ChallengeNotFound(_) | Error::HeadMismatch(_, _)),
+            "{err:?}"
+        );
     }
 }

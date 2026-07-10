@@ -112,6 +112,22 @@ pub enum Error {
     #[error("invalid operation: {0}")]
     InvalidOp(String),
 
+    /// Path is not delegated (no pubkey / lock for the branch)
+    #[error("path not delegated: {0}")]
+    PathNotDelegated(String),
+
+    /// Ops escape the declared delegated branch
+    #[error("operation path escapes delegated branch {0}: {1}")]
+    PathEscape(String, String),
+
+    /// Pending external-sign challenge not found or expired
+    #[error("unknown or expired path-update challenge: {0}")]
+    ChallengeNotFound(String),
+
+    /// Head moved since prepare (optimistic concurrency)
+    #[error("p-log head changed since prepare (expected {0}, current {1})")]
+    HeadMismatch(String, String),
+
     /// Keycard is already initialized or has a master key (create requires a virgin card)
     #[error(
         "keycard is not virgin: factory-reset the card before creating a new account ({0})"

@@ -1,6 +1,6 @@
 module logos_accounts_module {
-  version "3.0.0"
-  description "BetterSign accounts with pluggable key storage and local p-log cache"
+  version "4.0.0"
+  description "BetterSign accounts with pluggable key storage, local p-log cache, and path delegation"
 
   method create_account(storage_json: string) -> string
 
@@ -12,7 +12,20 @@ module logos_accounts_module {
   method update_account(vlad: string, ops_json: string) -> string
   method get_value(vlad: string, path: string) -> string
 
+  // Path delegation (root-signed policy)
+  method delegate_path(vlad: string, path: string, pubkey_multibase: string) -> string
+  method revoke_path(vlad: string, path: string) -> string
+  method list_delegations(vlad: string) -> string
+
+  // Writes under a delegated path
+  method update_path(vlad: string, path: string, ops_json: string) -> string
+  method prepare_path_update(vlad: string, path: string, ops_json: string) -> string
+  method commit_path_update(vlad: string, challenge_id: string, signature_multibase: string) -> string
+  method cancel_path_update(vlad: string, challenge_id: string) -> string
+
   event account_created(vlad: string)
   event account_updated(head_cid: string)
+  event path_delegated(vlad: string, path: string)
+  event path_revoked(vlad: string, path: string)
   event card_error(message: string)
 }

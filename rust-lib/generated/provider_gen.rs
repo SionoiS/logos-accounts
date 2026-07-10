@@ -59,6 +59,22 @@ pub fn emit_card_error(message: &str) {
     emit_event("card_error", &serde_json::Value::Array(payload));
 }
 
+/// Typed emitter for the `path_delegated` event.
+pub fn emit_path_delegated(vlad: &str, path: &str) {
+    let mut payload: Vec<serde_json::Value> = Vec::new();
+    payload.push(serde_json::Value::from(vlad));
+    payload.push(serde_json::Value::from(path));
+    emit_event("path_delegated", &serde_json::Value::Array(payload));
+}
+
+/// Typed emitter for the `path_revoked` event.
+pub fn emit_path_revoked(vlad: &str, path: &str) {
+    let mut payload: Vec<serde_json::Value> = Vec::new();
+    payload.push(serde_json::Value::from(vlad));
+    payload.push(serde_json::Value::from(path));
+    emit_event("path_revoked", &serde_json::Value::Array(payload));
+}
+
 /// Author-facing trait generated from the LIDL contract.
 pub trait LogosAccountsModule: Send + 'static {
     /// One-time setup after host stamps module context.
@@ -71,6 +87,27 @@ pub trait LogosAccountsModule: Send + 'static {
     fn clear_cache(&mut self) -> String;
     fn update_account(&mut self, vlad: String, ops_json: String) -> String;
     fn get_value(&mut self, vlad: String, path: String) -> String;
+
+    fn delegate_path(&mut self, vlad: String, path: String, pubkey_multibase: String) -> String;
+    fn revoke_path(&mut self, vlad: String, path: String) -> String;
+    fn list_delegations(&mut self, vlad: String) -> String;
+    fn update_path(&mut self, vlad: String, path: String, ops_json: String) -> String;
+    fn prepare_path_update(&mut self, vlad: String, path: String, ops_json: String) -> String;
+    fn commit_path_update(
+        &mut self,
+        vlad: String,
+        challenge_id: String,
+        signature_multibase: String,
+    ) -> String;
+    fn cancel_path_update(&mut self, vlad: String, challenge_id: String) -> String;
+}
+
+fn arg_str(args: &[serde_json::Value], i: usize) -> String {
+    args.get(i)
+        .unwrap_or(&serde_json::Value::Null)
+        .as_str()
+        .unwrap_or_default()
+        .to_string()
 }
 
 type DispatchFn = fn(&str, &[serde_json::Value]) -> Option<serde_json::Value>;
@@ -197,18 +234,59 @@ pub fn install<T: LogosAccountsModule + Default>() {
                 if args.len() < 2 {
                     return None;
                 }
-                let result = imp.get_value(
-                    args.get(0)
-                        .unwrap_or(&serde_json::Value::Null)
-                        .as_str()
-                        .unwrap_or_default()
-                        .to_string(),
-                    args.get(1)
-                        .unwrap_or(&serde_json::Value::Null)
-                        .as_str()
-                        .unwrap_or_default()
-                        .to_string(),
-                );
+                let result = imp.get_value(arg_str(args, 0), arg_str(args, 1));
+                Some(serde_json::Value::from(result))
+            }
+            "delegate_path" => {
+                if args.len() < 3 {
+                    return None;
+                }
+                let result =
+                    imp.delegate_path(arg_str(args, 0), arg_str(args, 1), arg_str(args, 2));
+                Some(serde_json::Value::from(result))
+            }
+            "revoke_path" => {
+                if args.len() < 2 {
+                    return None;
+                }
+                let result = imp.revoke_path(arg_str(args, 0), arg_str(args, 1));
+                Some(serde_json::Value::from(result))
+            }
+            "list_delegations" => {
+                if args.is_empty() {
+                    return None;
+                }
+                let result = imp.list_delegations(arg_str(args, 0));
+                Some(serde_json::Value::from(result))
+            }
+            "update_path" => {
+                if args.len() < 3 {
+                    return None;
+                }
+                let result = imp.update_path(arg_str(args, 0), arg_str(args, 1), arg_str(args, 2));
+                Some(serde_json::Value::from(result))
+            }
+            "prepare_path_update" => {
+                if args.len() < 3 {
+                    return None;
+                }
+                let result =
+                    imp.prepare_path_update(arg_str(args, 0), arg_str(args, 1), arg_str(args, 2));
+                Some(serde_json::Value::from(result))
+            }
+            "commit_path_update" => {
+                if args.len() < 3 {
+                    return None;
+                }
+                let result =
+                    imp.commit_path_update(arg_str(args, 0), arg_str(args, 1), arg_str(args, 2));
+                Some(serde_json::Value::from(result))
+            }
+            "cancel_path_update" => {
+                if args.len() < 2 {
+                    return None;
+                }
+                let result = imp.cancel_path_update(arg_str(args, 0), arg_str(args, 1));
                 Some(serde_json::Value::from(result))
             }
             _ => None,
@@ -285,8 +363,17 @@ pub extern "C" fn logos_module_get_methods() -> *mut c_char {
 {"isInvokable":true,"name":"clear_cache","parameters":[],"returnType":"QString","signature":"clear_cache()"},
 {"isInvokable":true,"name":"update_account","parameters":[{"name":"vlad","type":"QString"},{"name":"ops_json","type":"QString"}],"returnType":"QString","signature":"update_account(QString,QString)"},
 {"isInvokable":true,"name":"get_value","parameters":[{"name":"vlad","type":"QString"},{"name":"path","type":"QString"}],"returnType":"QString","signature":"get_value(QString,QString)"},
+{"isInvokable":true,"name":"delegate_path","parameters":[{"name":"vlad","type":"QString"},{"name":"path","type":"QString"},{"name":"pubkey_multibase","type":"QString"}],"returnType":"QString","signature":"delegate_path(QString,QString,QString)"},
+{"isInvokable":true,"name":"revoke_path","parameters":[{"name":"vlad","type":"QString"},{"name":"path","type":"QString"}],"returnType":"QString","signature":"revoke_path(QString,QString)"},
+{"isInvokable":true,"name":"list_delegations","parameters":[{"name":"vlad","type":"QString"}],"returnType":"QString","signature":"list_delegations(QString)"},
+{"isInvokable":true,"name":"update_path","parameters":[{"name":"vlad","type":"QString"},{"name":"path","type":"QString"},{"name":"ops_json","type":"QString"}],"returnType":"QString","signature":"update_path(QString,QString,QString)"},
+{"isInvokable":true,"name":"prepare_path_update","parameters":[{"name":"vlad","type":"QString"},{"name":"path","type":"QString"},{"name":"ops_json","type":"QString"}],"returnType":"QString","signature":"prepare_path_update(QString,QString,QString)"},
+{"isInvokable":true,"name":"commit_path_update","parameters":[{"name":"vlad","type":"QString"},{"name":"challenge_id","type":"QString"},{"name":"signature_multibase","type":"QString"}],"returnType":"QString","signature":"commit_path_update(QString,QString,QString)"},
+{"isInvokable":true,"name":"cancel_path_update","parameters":[{"name":"vlad","type":"QString"},{"name":"challenge_id","type":"QString"}],"returnType":"QString","signature":"cancel_path_update(QString,QString)"},
 {"name":"account_created","parameters":[{"name":"vlad","type":"QString"}],"signature":"account_created(QString)","type":"event"},
 {"name":"account_updated","parameters":[{"name":"head_cid","type":"QString"}],"signature":"account_updated(QString)","type":"event"},
+{"name":"path_delegated","parameters":[{"name":"vlad","type":"QString"},{"name":"path","type":"QString"}],"signature":"path_delegated(QString,QString)","type":"event"},
+{"name":"path_revoked","parameters":[{"name":"vlad","type":"QString"},{"name":"path","type":"QString"}],"signature":"path_revoked(QString,QString)","type":"event"},
 {"name":"card_error","parameters":[{"name":"message","type":"QString"}],"signature":"card_error(QString)","type":"event"}
 ]"#
         .replace('\n', "")

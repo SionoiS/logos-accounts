@@ -7,8 +7,8 @@ use crate::api::{AccountSummary, SoftwareAccountsApi};
 use crate::cache::{AccountCache, CachedAccount};
 use crate::storage::{parse_storage_json, CreateAccountResult, StorageConfig};
 use crate::{
-    context, emit_account_created, emit_account_updated, emit_card_error, LogosAccountsModule,
-    RustModuleContext,
+    context, emit_account_created, emit_account_updated, emit_card_error, emit_path_delegated,
+    emit_path_revoked, LogosAccountsModule, RustModuleContext,
 };
 use serde_json::json;
 
@@ -341,6 +341,197 @@ impl LogosAccountsModule for AccountsModuleImpl {
         };
         match result {
             Ok(v) => v.to_json_string(),
+            Err(e) => Self::err_json(e),
+        }
+    }
+
+    fn delegate_path(&mut self, vlad: String, path: String, pubkey_multibase: String) -> String {
+        let entry = match self.entry(&vlad) {
+            Ok(e) => e,
+            Err(e) => return Self::err_json(e),
+        };
+        let mut guard = match entry.lock() {
+            Ok(g) => g,
+            Err(e) => return Self::err_json(format!("cache entry lock poisoned: {e}")),
+        };
+        let result = match &mut *guard {
+            CachedAccount::Local(api) => self
+                .runtime
+                .block_on(api.delegate_path(&path, &pubkey_multibase))
+                .map_err(|e| e.to_string()),
+            #[cfg(feature = "pcsc")]
+            CachedAccount::Keycard(api) => self
+                .runtime
+                .block_on(api.delegate_path(&path, &pubkey_multibase))
+                .map_err(|e| e.to_string()),
+        };
+        match result {
+            Ok(summary) => {
+                emit_path_delegated(&vlad, &path);
+                emit_account_updated(&summary.head_cid);
+                Self::summary_json(&summary)
+            }
+            Err(e) => Self::err_json(e),
+        }
+    }
+
+    fn revoke_path(&mut self, vlad: String, path: String) -> String {
+        let entry = match self.entry(&vlad) {
+            Ok(e) => e,
+            Err(e) => return Self::err_json(e),
+        };
+        let mut guard = match entry.lock() {
+            Ok(g) => g,
+            Err(e) => return Self::err_json(format!("cache entry lock poisoned: {e}")),
+        };
+        let result = match &mut *guard {
+            CachedAccount::Local(api) => self
+                .runtime
+                .block_on(api.revoke_path(&path))
+                .map_err(|e| e.to_string()),
+            #[cfg(feature = "pcsc")]
+            CachedAccount::Keycard(api) => self
+                .runtime
+                .block_on(api.revoke_path(&path))
+                .map_err(|e| e.to_string()),
+        };
+        match result {
+            Ok(summary) => {
+                emit_path_revoked(&vlad, &path);
+                emit_account_updated(&summary.head_cid);
+                Self::summary_json(&summary)
+            }
+            Err(e) => Self::err_json(e),
+        }
+    }
+
+    fn list_delegations(&mut self, vlad: String) -> String {
+        let entry = match self.entry(&vlad) {
+            Ok(e) => e,
+            Err(e) => return Self::err_json(e),
+        };
+        let guard = match entry.lock() {
+            Ok(g) => g,
+            Err(e) => return Self::err_json(format!("cache entry lock poisoned: {e}")),
+        };
+        let result = match &*guard {
+            CachedAccount::Local(api) => api.list_delegations().map_err(|e| e.to_string()),
+            #[cfg(feature = "pcsc")]
+            CachedAccount::Keycard(api) => api.list_delegations().map_err(|e| e.to_string()),
+        };
+        match result {
+            Ok(list) => serde_json::to_string(&list)
+                .unwrap_or_else(|e| Self::err_json(e.to_string())),
+            Err(e) => Self::err_json(e),
+        }
+    }
+
+    fn update_path(&mut self, vlad: String, path: String, ops_json: String) -> String {
+        let entry = match self.entry(&vlad) {
+            Ok(e) => e,
+            Err(e) => return Self::err_json(e),
+        };
+        let mut guard = match entry.lock() {
+            Ok(g) => g,
+            Err(e) => return Self::err_json(format!("cache entry lock poisoned: {e}")),
+        };
+        let result = match &mut *guard {
+            CachedAccount::Local(api) => self
+                .runtime
+                .block_on(api.update_path(&path, &ops_json))
+                .map_err(|e| e.to_string()),
+            #[cfg(feature = "pcsc")]
+            CachedAccount::Keycard(api) => self
+                .runtime
+                .block_on(api.update_path(&path, &ops_json))
+                .map_err(|e| e.to_string()),
+        };
+        match result {
+            Ok(summary) => {
+                emit_account_updated(&summary.head_cid);
+                Self::summary_json(&summary)
+            }
+            Err(e) => Self::err_json(e),
+        }
+    }
+
+    fn prepare_path_update(&mut self, vlad: String, path: String, ops_json: String) -> String {
+        let entry = match self.entry(&vlad) {
+            Ok(e) => e,
+            Err(e) => return Self::err_json(e),
+        };
+        let mut guard = match entry.lock() {
+            Ok(g) => g,
+            Err(e) => return Self::err_json(format!("cache entry lock poisoned: {e}")),
+        };
+        let result = match &mut *guard {
+            CachedAccount::Local(api) => api
+                .prepare_path_update(&path, &ops_json)
+                .map_err(|e| e.to_string()),
+            #[cfg(feature = "pcsc")]
+            CachedAccount::Keycard(api) => api
+                .prepare_path_update(&path, &ops_json)
+                .map_err(|e| e.to_string()),
+        };
+        match result {
+            Ok(challenge) => serde_json::to_string(&challenge)
+                .unwrap_or_else(|e| Self::err_json(e.to_string())),
+            Err(e) => Self::err_json(e),
+        }
+    }
+
+    fn commit_path_update(
+        &mut self,
+        vlad: String,
+        challenge_id: String,
+        signature_multibase: String,
+    ) -> String {
+        let entry = match self.entry(&vlad) {
+            Ok(e) => e,
+            Err(e) => return Self::err_json(e),
+        };
+        let mut guard = match entry.lock() {
+            Ok(g) => g,
+            Err(e) => return Self::err_json(format!("cache entry lock poisoned: {e}")),
+        };
+        let result = match &mut *guard {
+            CachedAccount::Local(api) => api
+                .commit_path_update(&challenge_id, &signature_multibase)
+                .map_err(|e| e.to_string()),
+            #[cfg(feature = "pcsc")]
+            CachedAccount::Keycard(api) => api
+                .commit_path_update(&challenge_id, &signature_multibase)
+                .map_err(|e| e.to_string()),
+        };
+        match result {
+            Ok(summary) => {
+                emit_account_updated(&summary.head_cid);
+                Self::summary_json(&summary)
+            }
+            Err(e) => Self::err_json(e),
+        }
+    }
+
+    fn cancel_path_update(&mut self, vlad: String, challenge_id: String) -> String {
+        let entry = match self.entry(&vlad) {
+            Ok(e) => e,
+            Err(e) => return Self::err_json(e),
+        };
+        let mut guard = match entry.lock() {
+            Ok(g) => g,
+            Err(e) => return Self::err_json(format!("cache entry lock poisoned: {e}")),
+        };
+        let result = match &mut *guard {
+            CachedAccount::Local(api) => api
+                .cancel_path_update(&challenge_id)
+                .map_err(|e| e.to_string()),
+            #[cfg(feature = "pcsc")]
+            CachedAccount::Keycard(api) => api
+                .cancel_path_update(&challenge_id)
+                .map_err(|e| e.to_string()),
+        };
+        match result {
+            Ok(()) => json!({ "cancelled": true }).to_string(),
             Err(e) => Self::err_json(e),
         }
     }
